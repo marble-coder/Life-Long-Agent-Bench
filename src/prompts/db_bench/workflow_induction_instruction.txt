@@ -1,0 +1,19 @@
+Given a list of successful database task executions, extract common SQL workflows to solve these tasks.
+
+Each given task contains a natural language instruction, and a series of SQL queries with their execution results to solve the task. You need to find the repetitive subset of SQL patterns across multiple tasks, and extract each of them out as a workflow.
+
+Each workflow should be a commonly-reused sub-routine of the tasks. Do not generate similar or overlapping workflows. Each workflow should have at least two steps. Represent the non-fixed elements (table names, column names, values) with descriptive variable names as shown in the example.
+
+Format each workflow as:
+# Workflow N: <Brief Description>
+1. <Step 1 with generic placeholders like <table_name>, <column_name>, <value>>
+2. <Step 2 with generic placeholders>
+...
+
+Guidelines:
+- Focus on the SQL pattern and logical flow, not specific table/column names
+- Use angle brackets for placeholders: <table_name>, <column_name>, <value>, <condition>
+- Each workflow should be applicable to multiple similar tasks
+- Keep workflows simple and focused on one pattern
+- Extract 3-5 most common and useful workflows
+

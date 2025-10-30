@@ -1,0 +1,62 @@
+import:
+- ./configs/definition.yaml
+
+assignment_config:
+  task: db_bench
+  language_model_list:
+  - name: Llama-3.1-8B-Instruct
+  agent:
+    name: language_model_agent
+    custom_parameters:
+      language_model: Llama-3.1-8B-Instruct
+      inference_config_dict:
+        do_sample: false
+        num_beams: 1
+        max_new_tokens: 512
+        temperature: null
+        top_k: null
+        top_p: null
+  callback_dict:
+    callback_0:
+      name: current_session_saving_callback
+    callback_1:
+      name: consecutive_abnormal_agent_inference_process_handling_callback
+    callback_2:
+      name: previous_sample_utilization_callback
+      custom_parameters:
+        utilized_sample_count: 1
+  output_dir: outputs/{TIMESTAMP}
+  sample_order: default
+
+
+
+# 关键：禁用分布式模式
+environment_config:
+  use_task_client_flag: false
+# 🎯 关键：自定义语言模型配置，设置64K输入限制
+language_model_dict:
+  Llama-3.1-8B-Instruct:
+    module: "src.language_models.instance.huggingface_language_model.HuggingfaceLanguageModel"
+    parameters:
+      model_name_or_path: "/mnt/ssd2/models/Meta-Llama-3.1-8B-Instruct"
+      role_dict:
+        user: "user"
+        agent: "assistant"
+      dtype: "bfloat16"
+      device_map: "auto"
+
+# 使用USC版本的chat history
+task_dict:
+  db_bench:
+    parameters:
+      chat_history_item_factory:
+        parameters:
+          chat_history_item_dict_path: ./chat_history_items/previous_sample_utilization/db_bench.json
+
+# 🎯 覆盖callback默认值
+callback_dict:
+  previous_sample_utilization_callback:
+    module: src.callbacks.instance.previous_sample_utilization_callback.PreviousSampleUtilizationCallback
+    parameters:
+      utilized_sample_count: 1  # 🎯 确保所有地方都是64
+      original_first_user_prompt: task.chat_history_item_factory.construct(0, 'user')

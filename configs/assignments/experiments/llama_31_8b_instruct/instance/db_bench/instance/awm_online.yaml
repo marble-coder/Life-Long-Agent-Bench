@@ -1,0 +1,22 @@
+import:
+- ../task.yaml
+- ../../../agent.yaml
+- ../../../../../../definition.yaml
+assignment_config:
+  callback_dict:
+    callback_0:
+      name: current_session_saving_callback
+    callback_1:
+      name: consecutive_abnormal_agent_inference_process_handling_callback
+    callback_2:
+      name: db_bench_workflow_memory_callback  # AWM Online Workflow Memory
+      custom_parameters:
+        induction_frequency: 10
+        max_workflows: 16
+        min_success_samples: 1
+        max_examples_for_induction: 10
+        #temperature: 0.0
+  output_dir: outputs/awm_online/{TIMESTAMP}
+  sample_order: default
+environment_config:
+  use_task_client_flag: false
