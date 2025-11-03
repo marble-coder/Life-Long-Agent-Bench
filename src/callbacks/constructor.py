@@ -54,9 +54,17 @@ class CallbackConstructor:
                     unique_flag = TestTimeTrainingCallback.is_unique()
                     # TestTimeTrainingCallback 不需要额外的参数处理
                     # 所有参数都已经在配置文件中定义好了
+                case TestTimeTrainingAssistantOnlyCallback.__name__:
+                    unique_flag = TestTimeTrainingAssistantOnlyCallback.is_unique()
+                    # TestTimeTrainingAssistantOnlyCallback 不需要额外的参数处理
+                    # 所有参数都已经在配置文件中定义好了
                 case DBBenchWorkflowMemoryCallback.__name__:
                     unique_flag = DBBenchWorkflowMemoryCallback.is_unique()
                     # DBBenchWorkflowMemoryCallback 不需要额外的参数处理
+                    # 所有参数都已经在配置文件中定义好了
+                case TrajectoryMemoryCallback.__name__:
+                    unique_flag = TrajectoryMemoryCallback.is_unique()
+                    # TrajectoryMemoryCallback 不需要额外的参数处理
                     # 所有参数都已经在配置文件中定义好了
                 case _:
                     raise NotImplementedError(

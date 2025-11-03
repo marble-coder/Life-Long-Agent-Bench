@@ -2,6 +2,7 @@ import:
 - ../task.yaml
 - ../../../agent.yaml
 - ../../../../../../definition.yaml
+
 assignment_config:
   callback_dict:
     callback_0:
@@ -9,12 +10,6 @@ assignment_config:
     callback_1:
       name: consecutive_abnormal_agent_inference_process_handling_callback
     callback_2:
-      name: previous_sample_utilization_callback
-      custom_parameters:
-        utilized_sample_count: 4
-    # callback_3:  # <--- 添加这个新回调
-    #   name: test_time_training_callback
-    callback_3:
       name: test_time_training_assistant_only_callback
       custom_parameters:
         batch_size: 1
@@ -24,18 +19,14 @@ assignment_config:
         lora_alpha: 32
         lora_dropout: 0.1
         lora_target_modules: ["q_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
-        learning_rate: 0.001
+        learning_rate: 0.0001
         num_train_epochs: 1
         per_device_train_batch_size: 1
         gradient_accumulation_steps: 1
-        max_seq_length: 10240
+        max_seq_length: 3060
   output_dir: outputs/{TIMESTAMP}
   sample_order: default
+
 environment_config:
   use_task_client_flag: false
-task_dict:
-  db_bench:
-    parameters:
-      chat_history_item_factory:
-        parameters:
-          chat_history_item_dict_path: ./chat_history_items/previous_sample_utilization/db_bench.json
+

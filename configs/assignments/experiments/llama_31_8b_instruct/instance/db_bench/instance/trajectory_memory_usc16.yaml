@@ -1,0 +1,28 @@
+import:
+- ../task.yaml
+- ../../../agent.yaml
+- ../../../../../../definition.yaml
+- ../../../../../../components/callbacks/trajectory_memory_callback.yaml
+
+assignment_config:
+  callback_dict:
+    callback_0:
+      name: current_session_saving_callback
+    callback_1:
+      name: consecutive_abnormal_agent_inference_process_handling_callback
+    callback_2:
+      name: trajectory_memory_callback
+      custom_parameters:
+        top_k: 5  # 检索时注入的记忆条数
+        summary_max_items: 3
+        embedding_device: "cuda"  # 无 GPU 可改为 "cpu"
+        embedding_model_name: "/home/admin123/dhl/LLaMA-Factory/models/all-MiniLM-L6-v2"  # 本地Embedding模型路径
+        prompt_config_path: "./configs/components/prompts/trajectory_memory_prompt.yaml"
+        require_completed_status: false  # 即使任务未完成也总结memory
+        inject_marker: "\n\n================================================================================\n⚠️  CRITICAL: LESSONS FROM PREVIOUS ATTEMPTS ⚠️\nThe following memory items are extracted from real successful and failed trajectories.\nThese represent common pitfalls and proven strategies. You MUST carefully review and apply them.\nIgnoring these lessons may lead to task failure.\n================================================================================\n"
+        inject_end_marker: "\n================================================================================\n⚠️  END OF CRITICAL LESSONS - APPLY THEM AT EVERY STEP ⚠️\n================================================================================\n\n🔍 Before you begin: Review the lessons above and identify which ones are relevant.\n💡 During execution: Check if any lesson applies before making each decision.\n"
+  output_dir: outputs/{TIMESTAMP}
+  sample_order: default
+
+environment_config:
+  use_task_client_flag: false

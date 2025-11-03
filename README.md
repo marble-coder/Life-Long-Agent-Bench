@@ -1,7 +1,7 @@
 # run experiment
 # 设置环境变量
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-export CUDA_VISIBLE_DEVICES=0,1,2  # 只使用第一个GPU
+export CUDA_VISIBLE_DEVICES=2,3  # 只使用第一个GPU
 export PYTHONPATH=./
 # 运行实验
 python ./src/run_experiment.py --config_path "local_usc16_config.yaml"
@@ -22,7 +22,14 @@ docker rm -f $(docker ps -aq --filter ancestor=mysql) 2>/dev/null
 echo "✅ 清理完成！当前 MySQL 容器："
 docker ps -a | grep mysql || echo "无"
 
+# 运行test-time-training只训练assistant部分实验
+python ./src/run_experiment.py --config_path "configs/assignments/experiments/llama_31_8b_instruct/instance/db_bench/instance/sft_assistant_only.yaml"
 
+# 运行test-time-training只训练assistant部分+ 利用历史4条成功轨迹实验
+python ./src/run_experiment.py --config_path "configs/assignments/experiments/llama_31_8b_instruct/instance/db_bench/instance/previous_sample_utilization_usc4.yaml"
+
+# 运行test-time-training只训练assistant部分+ memory召回
+python ./src/run_experiment.py --config_path "configs/assignments/experiments/llama_31_8b_instruct/instance/db_bench/instance/sft_onlyassistant_memory.yaml"
 
 # LifelongAgentBench: Evaluating LLM Agents as Lifelong Learners
 

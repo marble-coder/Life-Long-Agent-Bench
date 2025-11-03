@@ -20,6 +20,8 @@ callback_dict:
     - ./components/callbacks/consecutive_abnormal_agent_inference_process_handling_callback.yaml
     - ./components/callbacks/test_time_training_callback.yaml #新建的sft call_back
     - ./components/callbacks/workflow_memory.yaml #AWM Online workflow memory
+    - ./components/callbacks/trajectory_memory_callback.yaml #总结+召回topk
+    - ./components/callbacks/test_time_training_assistant_only_callback.yaml #只训练assistant输出的sft call_back
 
 import:
   - ./components/logger.yaml
