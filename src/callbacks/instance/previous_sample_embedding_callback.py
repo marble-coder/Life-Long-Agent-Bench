@@ -374,7 +374,7 @@ class PreviousSampleEmbeddingCallback(Callback):
         agent_role_dict: Mapping[Role, str],
     ) -> str:
         if not records:
-            return ""
+            return "\n"
         parts = [
             "\nBelow are prior trajectories related to the current query; use them as guidance before planning SQL:\n"
         ]

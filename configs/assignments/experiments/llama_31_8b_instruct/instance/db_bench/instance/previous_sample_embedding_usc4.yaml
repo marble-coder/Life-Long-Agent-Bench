@@ -13,7 +13,8 @@ assignment_config:
       custom_parameters:
         utilized_sample_count: 4
         max_cached_session_count: 500
-        embedding_model_name: /mnt/ssd2/models/Qwen3-Embedding-4B
+        #embedding_model_name: /mnt/ssd2/models/Qwen3-Embedding-4B
+        embedding_model_name: /home/admin123/dhl/LLaMA-Factory/models/all-MiniLM-L6-v2
         embedding_device: cuda
         min_similarity: -100
   output_dir: outputs/{TIMESTAMP}
