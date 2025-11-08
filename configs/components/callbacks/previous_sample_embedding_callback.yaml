@@ -1,0 +1,9 @@
+previous_sample_embedding_callback:
+  module: "src.callbacks.instance.previous_sample_embedding_callback.PreviousSampleEmbeddingCallback"
+  parameters:
+    original_first_user_prompt: "task.chat_history_item_factory.construct(0, 'user')"  # placeholder, overwritten at runtime
+    utilized_sample_count: 16
+    embedding_model_name: "sentence-transformers/all-MiniLM-L6-v2"
+    embedding_device: "cpu"
+    max_cached_session_count: 64
+    min_similarity: -0.2

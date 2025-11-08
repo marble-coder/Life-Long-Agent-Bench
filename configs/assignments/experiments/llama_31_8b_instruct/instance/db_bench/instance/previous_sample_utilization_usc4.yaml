@@ -14,21 +14,21 @@ assignment_config:
         utilized_sample_count: 4
     # callback_3:  # <--- 添加这个新回调
     #   name: test_time_training_callback
-    callback_3:
-      name: test_time_training_assistant_only_callback
-      custom_parameters:
-        batch_size: 1
-        sft_data_dir: "outputs/{TIMESTAMP}/sft_data"
-        loss_log_path: "outputs/{TIMESTAMP}/loss_log.csv"
-        lora_r: 16
-        lora_alpha: 32
-        lora_dropout: 0.1
-        lora_target_modules: ["q_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
-        learning_rate: 0.001
-        num_train_epochs: 1
-        per_device_train_batch_size: 1
-        gradient_accumulation_steps: 1
-        max_seq_length: 10240
+    # callback_3:
+    #   name: test_time_training_assistant_only_callback
+    #   custom_parameters:
+    #     batch_size: 1
+    #     sft_data_dir: "outputs/{TIMESTAMP}/sft_data"
+    #     loss_log_path: "outputs/{TIMESTAMP}/loss_log.csv"
+    #     lora_r: 16
+    #     lora_alpha: 32
+    #     lora_dropout: 0.1
+    #     lora_target_modules: ["q_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+    #     learning_rate: 0.00001
+    #     num_train_epochs: 1
+    #     per_device_train_batch_size: 1
+    #     gradient_accumulation_steps: 1
+    #     max_seq_length: 3060
   output_dir: outputs/{TIMESTAMP}
   sample_order: default
 environment_config:

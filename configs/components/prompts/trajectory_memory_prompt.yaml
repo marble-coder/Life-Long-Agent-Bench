@@ -15,7 +15,6 @@ defaults:
       - Evidence: <salient steps or observations that justify it>
       - Reuse When: <signals or scenarios where it applies>
       - Watch Outs: <risks, limits, or follow-ups>
-      - Update: <which related memory items this refines; write 'none' if brand new>
       ```
     user: |
       Outcome: {outcome}
@@ -44,7 +43,6 @@ defaults:
       - Root Cause: <underlying reasoning or assumption that failed>
       - Recovery Plan: <how to fix it when detected>
       - Prevention: <signals or guardrails to avoid it next time>
-      - Update: <which related memory items this refines; write 'none' if brand new>
       ```
     user: |
       Outcome: {outcome}
@@ -73,7 +71,6 @@ defaults:
       - Supporting Evidence: <key observations from this run>
       - Next Steps: <experiments or checks to validate it>
       - Risks: <uncertainties or failure modes to monitor>
-      - Update: <which related memory items this refines; write 'none' if brand new>
       ```
     user: |
       Outcome: {outcome}
@@ -104,7 +101,6 @@ tasks:
         - Evidence: <steps or intermediate checks that proved it>
         - Reuse When: <query shapes or question types where it helps>
         - Watch Outs: <schema-specific traps to abstract away>
-        - Update: <which related memory items this refines; write 'none' if brand new>
         ```
     failure:
       system: |
@@ -121,5 +117,4 @@ tasks:
         - Root Cause: <why the SQL or reasoning failed>
         - Recovery Plan: <how to correct it>
         - Prevention: <checks to avoid repeat>
-        - Update: <which related memory items this refines; write 'none' if brand new>
         ```

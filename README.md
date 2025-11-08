@@ -1,7 +1,7 @@
 # run experiment
 # 设置环境变量
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-export CUDA_VISIBLE_DEVICES=2,3  # 只使用第一个GPU
+export CUDA_VISIBLE_DEVICES=2,3  
 export PYTHONPATH=./
 # 运行实验
 python ./src/run_experiment.py --config_path "local_usc16_config.yaml"
@@ -22,6 +22,10 @@ docker rm -f $(docker ps -aq --filter ancestor=mysql) 2>/dev/null
 echo "✅ 清理完成！当前 MySQL 容器："
 docker ps -a | grep mysql || echo "无"
 
+# 运行llama3-8b的memory+召回实验
+export DASHSCOPE_API_KEY=sk-30949268f306427886e6613da83a9e08
+python ./src/run_experiment.py --config_path "configs/assignments/experiments/llama_31_8b_instruct/instance/db_bench/instance/trajectory_memory_usc16.yaml"
+
 # 运行test-time-training只训练assistant部分实验
 python ./src/run_experiment.py --config_path "configs/assignments/experiments/llama_31_8b_instruct/instance/db_bench/instance/sft_assistant_only.yaml"
 
@@ -30,6 +34,23 @@ python ./src/run_experiment.py --config_path "configs/assignments/experiments/ll
 
 # 运行test-time-training只训练assistant部分+ memory召回
 python ./src/run_experiment.py --config_path "configs/assignments/experiments/llama_31_8b_instruct/instance/db_bench/instance/sft_onlyassistant_memory.yaml"
+
+# 运行qwen2.5-7b的memory策略
+export DASHSCOPE_API_KEY=sk-30949268f306427886e6613da83a9e08
+python ./src/run_experiment.py --config_path "configs/assignments/experiments/qwen25_7b_instruct/instance/db_bench/instance/memory.yaml"
+
+# 运行qwen2.5-7b standard策略
+python ./src/run_experiment.py --config_path "configs/assignments/experiments/qwen25_7b_instruct/instance/db_bench/instance/standard.yaml"
+
+# 运行memory实验时要设置API KEY调用qwen-plus
+export DASHSCOPE_API_KEY=sk-30949268f306427886e6613da83a9e08
+
+
+# 修改轨迹策略 改为用embedding model召回相关轨迹(4条)
+python ./src/run_experiment.py --config_path "configs/assignments/experiments/llama_31_8b_instruct/instance/db_bench/instance/previous_sample_embedding_usc4.yaml"
+
+# 运行正常的轨迹添加上下文策略
+python ./src/run_experiment.py --config_path "configs/assignments/experiments/llama_31_8b_instruct/instance/db_bench/instance/previous_sample_utilization_usc1.yaml"
 
 # LifelongAgentBench: Evaluating LLM Agents as Lifelong Learners
 

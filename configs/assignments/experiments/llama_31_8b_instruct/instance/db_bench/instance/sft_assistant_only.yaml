@@ -19,7 +19,7 @@ assignment_config:
         lora_alpha: 32
         lora_dropout: 0.1
         lora_target_modules: ["q_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
-        learning_rate: 0.0001
+        learning_rate: 0.00001
         num_train_epochs: 1
         per_device_train_batch_size: 1
         gradient_accumulation_steps: 1

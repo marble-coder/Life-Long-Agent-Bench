@@ -92,7 +92,6 @@ DEFAULT_PROMPT_CONFIG: dict[str, Any] = {
                 "- Evidence: <salient steps or observations that justify it>\n"
                 "- Reuse When: <signals or scenarios where it applies>\n"
                 "- Watch Outs: <risks, limits, or follow-ups>\n"
-                "- Update: <which related memory items this refines; write 'none' if brand new>\n"
                 "```"
             ),
             "user": (
@@ -119,7 +118,6 @@ DEFAULT_PROMPT_CONFIG: dict[str, Any] = {
                 "- Root Cause: <underlying reasoning or assumption that failed>\n"
                 "- Recovery Plan: <how to fix it when detected>\n"
                 "- Prevention: <signals or guardrails to avoid it next time>\n"
-                "- Update: <which related memory items this refines; write 'none' if brand new>\n"
                 "```"
             ),
             "user": (
@@ -146,7 +144,6 @@ DEFAULT_PROMPT_CONFIG: dict[str, Any] = {
                 "- Supporting Evidence: <key observations from this run>\n"
                 "- Next Steps: <experiments or checks to validate it>\n"
                 "- Risks: <uncertainties or failure modes to monitor>\n"
-                "- Update: <which related memory items this refines; write 'none' if brand new>\n"
                 "```"
             ),
             "user": (
@@ -171,16 +168,15 @@ DEFAULT_PROMPT_CONFIG: dict[str, Any] = {
                     "## Title <concise title>\n"
                     "## Description <1-2 sentences summarizing the insight>\n"
                     "## Content\n"
-                    "- Key Insight: <core SQL tactic or reasoning pattern>\n"
-                    "- Evidence: <steps or intermediate checks that proved it>\n"
-                    "- Reuse When: <query shapes or question types where it helps>\n"
-                    "- Watch Outs: <schema-specific traps to abstract away>\n"
-                    "- Update: <which related memory items this refines; write 'none' if brand new>\n"
-                    "```"
-                )
-            },
-            "failure": {
-                "system": (
+                "- Key Insight: <core SQL tactic or reasoning pattern>\n"
+                "- Evidence: <steps or intermediate checks that proved it>\n"
+                "- Reuse When: <query shapes or question types where it helps>\n"
+                "- Watch Outs: <schema-specific traps to abstract away>\n"
+                "```"
+            )
+        },
+        "failure": {
+            "system": (
                     "You are an expert SQL tutor analyzing an unsuccessful database reasoning trajectory with related memories.\n"
                     "Explain the incorrect assumptions or SQL issues, how to detect them, corrective strategies, and whether existing memories already cover them.\n"
                     "Refer to schema elements abstractly; do not expose literal table or column names.\n"
@@ -190,14 +186,13 @@ DEFAULT_PROMPT_CONFIG: dict[str, Any] = {
                     "## Title <concise title>\n"
                     "## Description <1-2 sentences summarizing the pitfall>\n"
                     "## Content\n"
-                    "- Failure Mode: <what went wrong>\n"
-                    "- Root Cause: <why the SQL or reasoning failed>\n"
-                    "- Recovery Plan: <how to correct it>\n"
-                    "- Prevention: <checks to avoid repeat>\n"
-                    "- Update: <which related memory items this refines; write 'none' if brand new>\n"
-                    "```"
-                )
-            },
+                "- Failure Mode: <what went wrong>\n"
+                "- Root Cause: <why the SQL or reasoning failed>\n"
+                "- Recovery Plan: <how to correct it>\n"
+                "- Prevention: <checks to avoid repeat>\n"
+                "```"
+            )
+        },
         }
     },
 }
@@ -297,6 +292,9 @@ class TrajectoryMemoryCallback(Callback):
         query_text = self._extract_query_text(session)
         if not query_text:
             return
+        self._log_query_text(
+            phase="retrieval", sample_index=session.sample_index, query=query_text
+        )
         selected = self._select_relevant_memories(query_text, limit=self.top_k)
         if not selected:
             return
@@ -332,6 +330,9 @@ class TrajectoryMemoryCallback(Callback):
         trajectory_text = self._extract_trajectory_text(session)
         if not query_text or not trajectory_text:
             return
+        self._log_query_text(
+            phase="summary", sample_index=session.sample_index, query=query_text
+        )
         outcome = session.evaluation_record.outcome
         if outcome == SessionEvaluationOutcome.UNSET:
             outcome = SessionEvaluationOutcome.UNKNOWN
@@ -429,12 +430,31 @@ class TrajectoryMemoryCallback(Callback):
 
     def _extract_query_text(self, session: Session) -> Optional[str]:
         chat_history = session.chat_history
+        try:
+            item = chat_history.get_item_deep_copy(2)
+        except IndexError:
+            item = None
+        if item and item.role == Role.USER:
+            content = item.content.strip()
+            if content:
+                return content
+
         length = chat_history.get_value_length()
         for idx in range(length):
-            item = chat_history.get_item_deep_copy(idx)
-            if item.role == Role.USER:
-                return item.content.strip()
+            candidate = chat_history.get_item_deep_copy(idx)
+            if candidate.role == Role.USER:
+                content = candidate.content.strip()
+                if content:
+                    return content
         return None
+
+    def _log_query_text(self, *, phase: str, sample_index: str | int, query: str) -> None:
+        preview = query.replace("\n", " ")
+        if len(preview) > 200:
+            preview = preview[:197] + "..."
+        SafeLogger.info(
+            f"[TrajectoryMemory] Query used for {phase} (sample={sample_index}): {preview}"
+        )
 
     def _extract_trajectory_text(self, session: Session) -> str:
         parts: list[str] = []

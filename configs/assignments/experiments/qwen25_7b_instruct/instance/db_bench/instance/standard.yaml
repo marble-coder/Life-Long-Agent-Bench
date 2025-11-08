@@ -11,4 +11,4 @@ assignment_config:
   output_dir: outputs/{TIMESTAMP}
   sample_order: default
 environment_config:
-  use_task_client_flag: true
+  use_task_client_flag: false

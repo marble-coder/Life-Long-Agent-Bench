@@ -33,6 +33,14 @@ class CallbackConstructor:
                     general_instance_factory.parameters[
                         "original_first_user_prompt"
                     ] = first_chat_history_item.content
+                case PreviousSampleEmbeddingCallback.__name__:
+                    unique_flag = PreviousSampleEmbeddingCallback.is_unique()
+                    first_chat_history_item = task.chat_history_item_factory.construct(
+                        0, expected_role=Role.USER
+                    )
+                    general_instance_factory.parameters[
+                        "original_first_user_prompt"
+                    ] = first_chat_history_item.content
                 case CurrentSessionSavingCallback.__name__:
                     unique_flag = CurrentSessionSavingCallback.is_unique()
                     saving_path = os.path.join(
