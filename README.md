@@ -1,7 +1,7 @@
 # run experiment
 # 设置环境变量
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-export CUDA_VISIBLE_DEVICES=2,3  
+export CUDA_VISIBLE_DEVICES=4,5  
 export PYTHONPATH=./
 # 运行实验
 python ./src/run_experiment.py --config_path "local_usc16_config.yaml"
@@ -52,6 +52,12 @@ python ./src/run_experiment.py --config_path "configs/assignments/experiments/ll
 # 运行正常的轨迹添加上下文策略
 python ./src/run_experiment.py --config_path "configs/assignments/experiments/llama_31_8b_instruct/instance/db_bench/instance/previous_sample_utilization_usc1.yaml"
 
+# 运行embedding model召回相关轨迹+ttt增强
+python ./src/run_experiment.py --config_path "configs/assignments/experiments/llama_31_8b_instruct/instance/db_bench/instance/previous_sample_embedding_ttt_clean_usc4.yaml"
+
+# 运行反思记忆
+export DASHSCOPE_API_KEY=sk-3c7d8138a66943ba9643ccebda724a00
+python ./src/run_experiment.py --config_path "configs/assignments/experiments/llama_31_8b_instruct/instance/db_bench/instance/baseline_reflective_memory.yaml"
 # LifelongAgentBench: Evaluating LLM Agents as Lifelong Learners
 
 <p align="center">

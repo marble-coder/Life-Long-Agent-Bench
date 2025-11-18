@@ -1,0 +1,16 @@
+reflective_memory_callback:
+  module: src.callbacks.instance.reflective_memory_callback.ReflectiveMemoryCallback
+  parameters:
+    api_model: "qwen-plus"
+    api_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    api_key_env: "DASHSCOPE_API_KEY"
+    summarizer_mode: "api"  # 可选: "api" 或 "local"
+    local_inference_config: {}
+    local_model_path: null
+    local_model_kwargs: {}
+    max_new_shards: 2
+    retrieval_top_k: 3
+    max_memory_items: 256
+    min_similarity: 0.35
+    embedding_model_name: "sentence-transformers/all-MiniLM-L6-v2"
+    embedding_device: "cpu"

@@ -191,6 +191,15 @@ class ConfigUtility:
         assignment_callback_dict: dict[str, Any] = raw_config["assignment_config"][
             "callback_dict"
         ]
+        # print("=" * 80)
+        # print("DEBUG: Checking callback_dict...")
+        # if "callback_dict" in raw_config:
+        #     available_callbacks = list(raw_config["callback_dict"].keys())
+        #     print(f"Available callbacks ({len(available_callbacks)}): {available_callbacks}")
+        # else:
+        #     print("ERROR: 'callback_dict' key not found in raw_config!")
+        #     print(f"Top-level keys: {list(raw_config.keys())}")
+        # print("=" * 80)
         for callback_key, callback_info_dict in assignment_callback_dict.items():
             default_callback_info_dict = raw_config["callback_dict"][
                 callback_info_dict["name"]

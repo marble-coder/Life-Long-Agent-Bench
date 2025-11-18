@@ -1,0 +1,37 @@
+import:
+- ../task.yaml
+- ../../../agent.yaml
+- ../../../../../../definition.yaml
+assignment_config:
+  callback_dict:
+    callback_0:
+      name: current_session_saving_callback
+    callback_1:
+      name: consecutive_abnormal_agent_inference_process_handling_callback
+    callback_2:
+      name: reflective_memory_callback
+      custom_parameters:
+        summarizer_mode: "api"
+        # local_model_path: "/mnt/ssd2/models/Meta-Llama-3.1-8B-Instruct"  # 与推理模型路径一致
+        # local_model_kwargs:
+        #   device_map: "auto"
+        #   dtype: "bfloat16"
+        # local_inference_config:
+        #   do_sample: false
+        #   temperature: 0.0
+        max_new_shards: 1
+        retrieval_top_k: 4
+        max_memory_items: 1000
+        min_similarity: 0
+        embedding_model_name: /mnt/ssd2/models/Qwen3-Embedding-4B
+        embedding_device: "cuda"
+  output_dir: outputs/{TIMESTAMP}
+  sample_order: default
+environment_config:
+  use_task_client_flag: false
+task_dict:
+  db_bench:
+    parameters:
+      chat_history_item_factory:
+        parameters:
+          chat_history_item_dict_path: ./chat_history_items/previous_sample_utilization/db_bench.json

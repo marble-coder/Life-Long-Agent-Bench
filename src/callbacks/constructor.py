@@ -66,6 +66,19 @@ class CallbackConstructor:
                     unique_flag = TestTimeTrainingAssistantOnlyCallback.is_unique()
                     # TestTimeTrainingAssistantOnlyCallback 不需要额外的参数处理
                     # 所有参数都已经在配置文件中定义好了
+                case TestTimeTrainingAssistantOnlyCleanCallback.__name__:
+                    unique_flag = (
+                        TestTimeTrainingAssistantOnlyCleanCallback.is_unique()
+                    )
+                    # Clean 版本同样无需额外参数加工
+                case TestTimeTrainingUserObservationCallback.__name__:
+                    unique_flag = TestTimeTrainingUserObservationCallback.is_unique()
+                    # User Observation 版本也不需要额外参数处理
+                case TestTimeTrainingAssistantOnlyRecallFreeSFTCallback.__name__:
+                    unique_flag = (
+                        TestTimeTrainingAssistantOnlyRecallFreeSFTCallback.is_unique()
+                    )
+                    # Recall-free 版本也无需额外参数处理
                 case DBBenchWorkflowMemoryCallback.__name__:
                     unique_flag = DBBenchWorkflowMemoryCallback.is_unique()
                     # DBBenchWorkflowMemoryCallback 不需要额外的参数处理
@@ -74,6 +87,9 @@ class CallbackConstructor:
                     unique_flag = TrajectoryMemoryCallback.is_unique()
                     # TrajectoryMemoryCallback 不需要额外的参数处理
                     # 所有参数都已经在配置文件中定义好了
+                case ReflectiveMemoryCallback.__name__:
+                    unique_flag = ReflectiveMemoryCallback.is_unique()
+                    # ReflectiveMemoryCallback 也不需要额外处理
                 case _:
                     raise NotImplementedError(
                         f"Callback {target_class_str} is not implemented or not handled in CallbackConstructor."
