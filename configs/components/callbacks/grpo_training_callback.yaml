@@ -1,0 +1,5 @@
+grpo_training_callback:
+  module: src.callbacks.instance.grpo_training_callback.GRPOTrainingCallback
+  parameters:
+    # Path to GRPO hyper-parameter config. Edit this file to tune group_size, decoding, GRPO/LoRA/optim params.
+    config_path: "./configs/components/rl/db_bench_grpo.yaml"

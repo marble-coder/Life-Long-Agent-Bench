@@ -1,0 +1,14 @@
+assignment_config:
+  language_model_list:
+  - name: Llama-3.1-8B-Instruct
+  agent:
+    name: language_model_agent
+    custom_parameters:
+      language_model: Llama-3.1-8B-Instruct
+      inference_config_dict:
+        do_sample: true
+        num_beams: 1
+        max_new_tokens: 512
+        temperature: 0.8
+        top_k: null
+        top_p: 0.95

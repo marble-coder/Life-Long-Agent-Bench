@@ -294,6 +294,12 @@ class TestTimeTrainingAssistantOnlyCallback(Callback):
     def on_task_complete(self, callback_args: CallbackArguments) -> None:
         """在每个样本完成后，检查是否成功并收集轨迹"""
         session = callback_args.current_session
+        # 仅在前 100 条样本上进行 SFT
+        try:
+            if int(session.sample_index) >= 100:
+                return
+        except Exception:
+            pass
         
         # 只收集成功的轨迹
         if (

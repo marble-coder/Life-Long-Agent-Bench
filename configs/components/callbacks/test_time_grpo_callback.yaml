@@ -1,0 +1,17 @@
+test_time_grpo_callback:
+  module: src.callbacks.instance.test_time_grpo_callback.TestTimeGRPOCallback
+  parameters:
+    rollout_n: 4
+    temperature: 0.8
+    top_p: 0.95
+    top_k: null
+    max_new_tokens: 512
+    learning_rate: 1.0e-5
+    gradient_accumulation_steps: 1
+    ppo_epochs: 1
+    max_seq_length: 3072
+    norm_adv_by_std: true
+    lora_r: 16
+    lora_alpha: 32
+    lora_dropout: 0.05
+    lora_target_modules: ["q_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]

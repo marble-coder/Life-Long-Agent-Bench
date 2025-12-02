@@ -1,0 +1,34 @@
+import:
+  - ../task.yaml
+  - ../../../agent.yaml
+  - ../../../../../../definition.yaml
+
+assignment_config:
+  callback_dict:
+    callback_0:
+      name: current_session_saving_callback
+    callback_1:
+      name: consecutive_abnormal_agent_inference_process_handling_callback
+    callback_2:
+      name: previous_sample_utilization_callback
+      custom_parameters:
+        utilized_sample_count: 1  # 仅召回1条历史轨迹
+    callback_sft:
+      name: test_time_training_assistant_only_callback  # 前100样本触发SFT（回调内已加分段）
+    callback_grpo:
+      name: grpo_training_callback  # 样本>=100触发GRPO（回调内已加分段）
+      custom_parameters:
+        config_path: "./configs/components/rl/db_bench_grpo.yaml"
+  output_dir: outputs/{TIMESTAMP}
+  sample_order: default
+
+environment_config:
+  use_task_client_flag: false
+
+# 切换到召回模板，配合 previous_sample_utilization_callback
+task_dict:
+  db_bench:
+    parameters:
+      chat_history_item_factory:
+        parameters:
+          chat_history_item_dict_path: ./chat_history_items/previous_sample_utilization/db_bench.json

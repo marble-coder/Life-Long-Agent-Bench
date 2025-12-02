@@ -38,6 +38,7 @@ from .test_time_training_assistant_only_recall_free_callback import (
     TestTimeTrainingAssistantOnlyRecallFreeSFTCallback,
 )
 from .reflective_memory_callback import ReflectiveMemoryCallback
+from .grpo_training_callback import GRPOTrainingCallback
 __all__ = [
     "CurrentSessionSavingCallback",
     "PreviousSampleUtilizationCallback",
@@ -53,4 +54,5 @@ __all__ = [
     "TestTimeTrainingUserObservationCallback",
     "TestTimeTrainingAssistantOnlyRecallFreeSFTCallback",
     "ReflectiveMemoryCallback",
+    "GRPOTrainingCallback",
 ]

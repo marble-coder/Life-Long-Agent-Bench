@@ -19,6 +19,7 @@ from src.typings import (
     PathConfig,
     GeneralInstanceFactory,
     SessionMetricCalculationPartial,
+    SessionEvaluationOutcome,
 )
 from src.tasks import Task, DatasetItem
 from src.agents import Agent
@@ -30,6 +31,10 @@ from src.callbacks import (
     CallbackRestorer,
     CallbackArguments,
 )
+try:
+    from src.callbacks.instance import GRPOTrainingCallback
+except Exception:
+    GRPOTrainingCallback = None  # type: ignore
 
 
 class ConfigUtilityCaller(StrEnum):
@@ -307,6 +312,7 @@ def main() -> None:
     # region Prepare variables
     parser = argparse.ArgumentParser()
     parser.add_argument("--config_path", type=str)
+    parser.add_argument("--max_samples", type=int, default=None, help="Limit number of samples to run.")
     args = parser.parse_args()
     raw_config = ConfigLoader().load_from(args.config_path)
     assignment_config, environment_config, logger_config, path_config = (
@@ -367,6 +373,12 @@ def main() -> None:
         session_list = []
         unfinished_sample_order = assignment_config.sample_order
     callback_handler = CallbackHandler(callback_dict)
+    enable_grpo = GRPOTrainingCallback is not None and any(
+        isinstance(cb, GRPOTrainingCallback) for cb in callback_dict.values()
+    )
+    # Apply sample limit if provided
+    if args.max_samples is not None and args.max_samples > 0:
+        unfinished_sample_order = unfinished_sample_order[: args.max_samples]
     # endregion
     # region Run experiment
     logger.info(
@@ -374,46 +386,137 @@ def main() -> None:
         f"Total sample count: {len(assignment_config.sample_order)}. "
         f"Unfinished sample count: {len(unfinished_sample_order)}."
     )
+    # region Determine RL sampling config from callbacks (default group_size=1)
+    def _get_group_config(callback_dict: Mapping[str, Callback]) -> tuple[int, str]:
+        group_size = 1
+        strategy = "best_reward"
+        for cb in callback_dict.values():
+            if hasattr(cb, "group_size"):
+                group_size = max(group_size, getattr(cb, "group_size"))
+            if hasattr(cb, "best_metric_strategy"):
+                strategy = getattr(cb, "best_metric_strategy")
+        return group_size, strategy
+
+    # 奖励函数已移至grpo_training_callback.py中的_calc_reward方法
+
+    group_size, best_metric_strategy = _get_group_config(callback_dict)
+    if not enable_grpo:
+        group_size = 1
+    # endregion
+    group_correct_record: list[bool] = []
     for sample_index in unfinished_sample_order:
-        # region Initialize session
-        session = Session(task_name=task.task_name, sample_index=sample_index)
-        callback_args = CallbackArguments(
-            current_session=session, task=task, agent=agent, session_list=session_list
+        logger.info(
+            f"Sample {sample_index} start with group_size={group_size} (best_metric_strategy={best_metric_strategy})."
         )
-        callback_handler.on_session_create(callback_args)
-        if callback_args.session_controller.should_task_reset:
-            task.reset(session)
-            callback_handler.on_task_reset(callback_args)
-        logger.info(f"Sample {sample_index} start.")
-        # endregion
-        # region Run session
-        while session.sample_status == SampleStatus.RUNNING:
-            if callback_args.session_controller.should_agent_inference:
-                agent.inference(session)
-                callback_handler.on_agent_inference(callback_args)
-            if callback_args.session_controller.should_task_interact:
-                task.interact(session)
-                callback_handler.on_task_interact(callback_args)
-        # endregion
-        # region Complete session
-        if callback_args.session_controller.should_task_complete:
-            task.complete(session)
-            callback_handler.on_task_complete(callback_args)
-        session_list.append(session)
+        # ----- Greedy evaluation pass (for metric) -----
+        original_inference_cfg = getattr(agent, "_inference_config_dict", None)
+        max_new_tokens = None
+        if isinstance(original_inference_cfg, dict):
+            max_new_tokens = original_inference_cfg.get("max_new_tokens")
+        greedy_inference_cfg = {
+            "do_sample": False,
+            "num_beams": 1,
+            "temperature": None,
+            "top_p": None,
+            "max_new_tokens": max_new_tokens if max_new_tokens is not None else 512,
+        }
+        agent._inference_config_dict = greedy_inference_cfg  # type: ignore[attr-defined]
+        setattr(agent, "_force_greedy", True)
+        # Temporarily ask GRPO callbacks to skip override
+        grpo_callbacks = [
+            cb for cb in callback_dict.values() if GRPOTrainingCallback is not None and isinstance(cb, GRPOTrainingCallback)
+        ]
+        for cb in grpo_callbacks:
+            cb.skip_override = True  # type: ignore[attr-defined]
+
+        greedy_session = Session(task_name=task.task_name, sample_index=sample_index)
+        greedy_callback_args = CallbackArguments(
+            current_session=greedy_session,
+            task=task,
+            agent=agent,
+            session_list=session_list,
+        )
+        callback_handler.on_session_create(greedy_callback_args)
+        if greedy_callback_args.session_controller.should_task_reset:
+            task.reset(greedy_session)
+            callback_handler.on_task_reset(greedy_callback_args)
+        logger.info(f"Sample {sample_index} greedy eval start.")
+        while greedy_session.sample_status == SampleStatus.RUNNING:
+            if greedy_callback_args.session_controller.should_agent_inference:
+                agent.inference(greedy_session)
+                callback_handler.on_agent_inference(greedy_callback_args)
+            if greedy_callback_args.session_controller.should_task_interact:
+                task.interact(greedy_session)
+                callback_handler.on_task_interact(greedy_callback_args)
+        if greedy_callback_args.session_controller.should_task_complete:
+            greedy_session.finish_reason = "GREEDY_EVAL"
+            task.complete(greedy_session)
+            callback_handler.on_task_complete(greedy_callback_args)
+        logger.info(
+            f"Sample {sample_index} greedy eval end. "
+            f"Session status: {greedy_session.sample_status}. "
+            f"Evaluation outcome: {greedy_session.evaluation_record.outcome}."
+        )
+        # Record metric based on greedy only
+        session_list.append(greedy_session)
+        sample_any_correct = (
+            greedy_session.evaluation_record.outcome == SessionEvaluationOutcome.CORRECT
+        )
+        group_correct_record.append(sample_any_correct)
+        # Persist current session list
         json.dump(
             [s.model_dump() for s in session_list],
             open(session_list_output_path, "w"),  # noqa
             indent=2,
         )
-        logger.info(
-            f"Sample {sample_index} end. Session status: {session.sample_status}. "
-            f"Evaluation outcome: {session.evaluation_record.outcome}."
+        # Restore inference config for sampling
+        agent._inference_config_dict = original_inference_cfg  # type: ignore[attr-defined]
+        if hasattr(agent, "_force_greedy"):
+            delattr(agent, "_force_greedy")
+        for cb in grpo_callbacks:
+            cb.skip_override = False  # type: ignore[attr-defined]
+
+        # ----- GRPO sampling/training passes (not used for metric) -----
+        last_training_session: Optional[Session] = None
+        if enable_grpo:
+            for attempt_id in range(group_size):
+                session = Session(task_name=task.task_name, sample_index=sample_index)
+                callback_args = CallbackArguments(
+                    current_session=session,
+                    task=task,
+                    agent=agent,
+                    session_list=session_list,
+                )
+                callback_handler.on_session_create(callback_args)
+                if callback_args.session_controller.should_task_reset:
+                    task.reset(session)
+                    callback_handler.on_task_reset(callback_args)
+                logger.info(f"Sample {sample_index} training attempt {attempt_id + 1}/{group_size} start.")
+                while session.sample_status == SampleStatus.RUNNING:
+                    if callback_args.session_controller.should_agent_inference:
+                        agent.inference(session)
+                        callback_handler.on_agent_inference(callback_args)
+                    if callback_args.session_controller.should_task_interact:
+                        task.interact(session)
+                        callback_handler.on_task_interact(callback_args)
+                if callback_args.session_controller.should_task_complete:
+                    task.complete(session)
+                    callback_handler.on_task_complete(callback_args)
+                logger.info(
+                    f"Sample {sample_index} training attempt {attempt_id + 1}/{group_size} end. "
+                    f"Session status: {session.sample_status}. "
+                    f"Evaluation outcome: {session.evaluation_record.outcome}."
+                )
+                last_training_session = session
+        # Save callback state based on last training attempt (or greedy if no training run)
+        state_session = last_training_session if last_training_session is not None else greedy_session
+        callback_args = CallbackArguments(
+            current_session=state_session,
+            task=task,
+            agent=agent,
+            session_list=session_list,
         )
-        # endregion
-        # region Save callback state
-        # The state of callback will be used to restore the previous incomplete assignment.
         callback_handler.on_state_save(callback_args)
-        # endregion
     # endregion
     # region Evaluate
     session_metric_calculation_partial_list: Sequence[
@@ -427,6 +530,15 @@ def main() -> None:
         for session in session_list
     ]
     metric = task.calculate_metric(session_metric_calculation_partial_list)
+    # Custom grouped accuracy: a sample is correct if any attempt was correct
+    total_samples = len(group_correct_record)
+    correct_samples = sum(1 for flag in group_correct_record if flag)
+    group_accuracy = correct_samples / total_samples if total_samples > 0 else 0.0
+    metric["group_sample_accuracy"] = {
+        "total_samples": total_samples,
+        "correct_samples": correct_samples,
+        "accuracy": group_accuracy,
+    }
     logger.info(
         f"Experiment end. Metric: {metric}. Total sample count: {len(assignment_config.sample_order)}.",
     )

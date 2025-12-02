@@ -27,6 +27,8 @@ callback_dict:
     - ./components/callbacks/test_time_training_user_observation_callback.yaml #失败样本世界模型
     - ./components/callbacks/test_time_training_assistant_only_recall_free_callback.yaml #去除召回内容的SFT
     - ./components/callbacks/reflective_memory_callback.yaml #反思式记忆抽取
+    - ./components/callbacks/test_time_grpo_callback.yaml #test-time GRPO online adaptation
+    - ./components/callbacks/grpo_training_callback.yaml # GRPO + LoRA on-policy trainer
 
 import:
   - ./components/logger.yaml

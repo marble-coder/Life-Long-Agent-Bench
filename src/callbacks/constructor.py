@@ -90,6 +90,8 @@ class CallbackConstructor:
                 case ReflectiveMemoryCallback.__name__:
                     unique_flag = ReflectiveMemoryCallback.is_unique()
                     # ReflectiveMemoryCallback 也不需要额外处理
+                case GRPOTrainingCallback.__name__:
+                    unique_flag = GRPOTrainingCallback.is_unique()
                 case _:
                     raise NotImplementedError(
                         f"Callback {target_class_str} is not implemented or not handled in CallbackConstructor."

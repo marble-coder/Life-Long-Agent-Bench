@@ -1,8 +1,11 @@
 # run experiment
 # 设置环境变量
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-export CUDA_VISIBLE_DEVICES=4,5  
+export CUDA_VISIBLE_DEVICES=0,2
 export PYTHONPATH=./
+
+# 强制终止进程
+pkill -9 -f run_experiment.py
 # 运行实验
 python ./src/run_experiment.py --config_path "local_usc16_config.yaml"
 
@@ -58,6 +61,40 @@ python ./src/run_experiment.py --config_path "configs/assignments/experiments/ll
 # 运行反思记忆
 export DASHSCOPE_API_KEY=sk-3c7d8138a66943ba9643ccebda724a00
 python ./src/run_experiment.py --config_path "configs/assignments/experiments/llama_31_8b_instruct/instance/db_bench/instance/baseline_reflective_memory.yaml"
+
+# 运行test-time-grpo-lora
+python ./src/run_experiment.py --config_path "configs/assignments/experiments/llama_31_8b_instruct/instance/db_bench/instance/grpo_test_time_training.yaml"
+
+# 运行grpo_lora
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export CUDA_VISIBLE_DEVICES=1,6  
+export PYTHONPATH=./:./rllm
+python ./src/run_experiment.py --config_path "configs/assignments/experiments/llama_31_8b_instruct/instance/db_bench/instance/grpo.yaml" --max_samples 100
+
+
+# 运行grpo_lora+历史轨迹
+python ./src/run_experiment.py --config_path "configs/assignments/experiments/llama_31_8b_instruct/instance/db_bench/instance/grpo_with_history.yaml" --max_samples 1
+
+# rllm_grpo
+## 运行先贪心再 GRPO 的脚本
+依赖：本地 HF 权重、CUDA、Docker（MySQL 镜像）。
+```bash
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export CUDA_VISIBLE_DEVICES=0,1  
+export PYTHONPATH=./:./rllm
+python3 -m src.rllm_integration.run_dbbench_greedy_grpo \
+  --model_path /mnt/ssd2/models/Meta-Llama-3.1-8B-Instruct \
+  --group_size 4 \
+  --max_new_tokens 512 \
+  --temperature 0.8 \
+  --top_p 0.95 \
+  --lora_r 16 --lora_alpha 32 --lora_dropout 0.05 \
+  --learning_rate 2e-5 --weight_decay 0.01 \
+  --beta 0.04 --clip_param 0.2 --grad_accum 1 --max_grad_norm 1.0 --num_epochs 1 \
+  --reference_model_path /mnt/ssd2/models/Meta-Llama-3.1-8B-Instruct \
+  --save_dir outputs/dbbench_grpo_lora
+```
+
 # LifelongAgentBench: Evaluating LLM Agents as Lifelong Learners
 
 <p align="center">
