@@ -473,23 +473,40 @@ class GRPOTrainingCallback(Callback):
                 old_logps = attempt.sampling_logprobs.to(device) if attempt.sampling_logprobs is not None else attempt.gen_logprobs.to(device)
                 ref_logps = attempt.ref_logprobs.to(device)
 
-                # 计算PPO ratio
-                ratio = torch.exp(new_logps - old_logps)
+                # 计算PPO ratio（数值稳定版本）
+                logp_diff = new_logps - old_logps
+                # 限制logp差异范围，避免exp爆炸
+                logp_diff = torch.clamp(logp_diff, -20.0, 20.0)
+                ratio = torch.exp(logp_diff)
                 clipped_ratio = torch.clamp(ratio, 1 - clip_param, 1 + clip_param)
 
                 # 获取对应的advantage
                 advantage = rewards[idx] if idx < len(rewards) else rewards[-1]
                 policy_component = torch.min(ratio * advantage, clipped_ratio * advantage)
 
-                # KL散度惩罚（使用正确的近似反向KL）
+                # KL散度惩罚（数值稳定版本）
                 # KL(π_ref || π_new) ≈ (ratio_ref - 1) - log(ratio_ref)
-                # 其中 ratio_ref = π_new / π_ref = exp(new_logps - ref_logps)
-                ratio_ref = torch.exp(new_logps - ref_logps)
-                per_token_kl = ratio_ref - torch.log(ratio_ref) - 1.0
+                logp_ref_diff = new_logps - ref_logps
+                logp_ref_diff = torch.clamp(logp_ref_diff, -20.0, 20.0)  # 限制范围
+                ratio_ref = torch.exp(logp_ref_diff)
+                # 使用数值稳定的KL计算
+                per_token_kl = ratio_ref - logp_ref_diff - 1.0
 
                 policy_loss = -policy_component.mean()
                 kl_loss = beta * per_token_kl.mean()
+
+                # 额外的loss clip保护
+                policy_loss = torch.clamp(policy_loss, -100.0, 100.0)
+                kl_loss = torch.clamp(kl_loss, -10.0, 10.0)
+
                 loss = (policy_loss + kl_loss) / grad_accum
+
+                # 检测异常loss，跳过这个batch
+                if torch.isnan(loss) or torch.isinf(loss) or abs(loss.item()) > 50.0:
+                    print(f"[WARNING] Abnormal loss detected: {loss.item():.2f}, skipping this batch")
+                    self.optimizer.zero_grad()  # 清空梯度
+                    continue
+
                 loss.backward()
                 backward_calls += 1
                 if (idx + 1) % grad_accum == 0:

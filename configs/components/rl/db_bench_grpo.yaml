@@ -11,7 +11,7 @@ generation:
   # You can add other HF generation kwargs if needed.
 
 grpo:
-  beta: 0.04
+  beta: 0.04 #之前0.04
   clip_param: 0.2
   normalize_rewards: true
   use_best_of_n: false 
@@ -19,15 +19,15 @@ grpo:
   reference_model_path: "/mnt/ssd2/models/Meta-Llama-3.1-8B-Instruct"
 
 lora:
-  r: 64
+  r: 64 #之前是16 32
   alpha: 128
   dropout: 0.05
   target_modules: ["q_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 
 optim:
-  learning_rate: 2.0e-5
+  learning_rate: 2.0e-5 #之前是1e-6
   weight_decay: 0.01
-  max_grad_norm: 100
+  max_grad_norm: 1 #之前是100
   num_train_epochs: 1
   gradient_accumulation_steps: 1
 
