@@ -1,0 +1,38 @@
+group_size: 4  # how many attempts per sample before one GRPO update
+best_metric_strategy: best_reward  # options: best_reward (1 beats -1), best_reward_last (prefer latest among best)
+
+generation:
+  do_sample: true
+  temperature: 0.8
+  top_p: 0.95
+  max_new_tokens: 512
+  num_beams: 1
+
+grpo:
+  beta: 0.04  # KL系数，防止模型偏离太远
+  clip_param: 0.2  # PPO clip参数
+  normalize_rewards: true  # 开启归一化，这是GRPO的核心（Group Relative）
+  use_best_of_n: false  # 关闭Best-of-N，使用全部4个样本以避免2样本归一化问题
+  reference_model_path: null  # optional: path to frozen reference model; null uses initial policy as reference
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: ["q_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+
+optim:
+  learning_rate: 2.0e-5
+  weight_decay: 0.01
+  max_grad_norm: 1  # 梯度裁剪阈值（更保守）
+  num_train_epochs: 1
+  gradient_accumulation_steps: 1
+
+save:
+  lora_output_dir: "outputs/{TIMESTAMP}/grpo_rllm_lora"
+
+# 新增：监控配置
+monitoring:
+  tensorboard: true  # 启用TensorBoard实时监控
+  log_interval: 1  # 每步记录
+  histogram_interval: 10  # 每10步记录分布（可选，当前未实现）

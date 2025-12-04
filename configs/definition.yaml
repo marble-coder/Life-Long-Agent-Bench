@@ -29,6 +29,7 @@ callback_dict:
     - ./components/callbacks/reflective_memory_callback.yaml #反思式记忆抽取
     - ./components/callbacks/test_time_grpo_callback.yaml #test-time GRPO online adaptation
     - ./components/callbacks/grpo_training_callback.yaml # GRPO + LoRA on-policy trainer
+    - ./components/callbacks/grpo_training_callback_rllm.yaml # GRPO + LoRA using rllm/verl framework
 
 import:
   - ./components/logger.yaml

@@ -35,6 +35,10 @@ try:
     from src.callbacks.instance import GRPOTrainingCallback
 except Exception:
     GRPOTrainingCallback = None  # type: ignore
+try:
+    from src.callbacks.instance import GRPOTrainingCallbackRLLM
+except Exception:
+    GRPOTrainingCallbackRLLM = None  # type: ignore
 
 
 class ConfigUtilityCaller(StrEnum):
@@ -373,8 +377,11 @@ def main() -> None:
         session_list = []
         unfinished_sample_order = assignment_config.sample_order
     callback_handler = CallbackHandler(callback_dict)
-    enable_grpo = GRPOTrainingCallback is not None and any(
-        isinstance(cb, GRPOTrainingCallback) for cb in callback_dict.values()
+    # 检测是否启用GRPO训练（支持原版和RLLM版本）
+    enable_grpo = any(
+        (GRPOTrainingCallback is not None and isinstance(cb, GRPOTrainingCallback)) or
+        (GRPOTrainingCallbackRLLM is not None and isinstance(cb, GRPOTrainingCallbackRLLM))
+        for cb in callback_dict.values()
     )
     # Apply sample limit if provided
     if args.max_samples is not None and args.max_samples > 0:
