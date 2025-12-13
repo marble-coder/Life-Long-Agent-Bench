@@ -2,9 +2,10 @@ import json
 import os
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Mapping, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 import numpy as np
+from openai import OpenAI
 from sentence_transformers import SentenceTransformer
 
 from src.callbacks.callback import Callback, CallbackArguments
@@ -20,11 +21,14 @@ from src.utils import SafeLogger
 
 @dataclass
 class _SessionRecord:
-    """Stored successful session enriched with query text and embedding."""
+    """Stored session enriched with query text, embedding, outcome and optional reflection."""
 
     session: Session
     query_text: str = ""
     embedding: Optional[list[float]] = None
+    reflection: str = ""  # 对轨迹的反思/总结（可选）
+    outcome: str = "success"  # "success" or "failure"
+    error_message: str = ""  # 失败时的错误信息
     created_at: str = field(
         default_factory=lambda: datetime.utcnow().isoformat(timespec="seconds")
     )
@@ -33,10 +37,15 @@ class _SessionRecord:
         payload: dict[str, object] = {
             "session": self.session.model_dump(),
             "query_text": self.query_text,
+            "outcome": self.outcome,
             "created_at": self.created_at,
         }
         if self.embedding is not None:
             payload["embedding"] = [float(v) for v in self.embedding]
+        if self.reflection:
+            payload["reflection"] = self.reflection
+        if self.error_message:
+            payload["error_message"] = self.error_message
         return payload
 
 
@@ -57,6 +66,16 @@ class PreviousSampleEmbeddingCallback(Callback):
         embedding_device: str = "cpu",
         max_cached_session_count: Optional[int] = None,
         min_similarity: float = -0.2,
+        enable_memory_review: bool = False,  # 是否启用 memory review 格式
+        store_failed_trajectories: bool = False,  # 是否存储失败轨迹
+        # 反思功能相关参数
+        enable_reflection: bool = False,  # 是否启用轨迹反思/总结
+        reflection_api_model: str = "qwen-plus",
+        reflection_api_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        reflection_api_key_env: str = "DASHSCOPE_API_KEY",
+        reflection_api_temperature: Optional[float] = 0.0,  # 默认贪婪解码
+        reflection_system_prompt: Optional[str] = None,  # 外部传入的 system prompt
+        reflection_user_prompt_template: Optional[str] = None,  # 外部传入的 user prompt 模板
     ):
         super().__init__()
         self.original_first_user_prompt = original_first_user_prompt
@@ -71,8 +90,25 @@ class PreviousSampleEmbeddingCallback(Callback):
         self.embedding_model_name = embedding_model_name
         self.embedding_device = embedding_device
         self.min_similarity = min_similarity
+        self.enable_memory_review = enable_memory_review
+        self.store_failed_trajectories = store_failed_trajectories
+
+        # 反思功能
+        self.enable_reflection = enable_reflection
+        self.reflection_api_model = reflection_api_model
+        self.reflection_api_base_url = reflection_api_base_url
+        self.reflection_api_key_env = reflection_api_key_env
+        self.reflection_api_temperature = reflection_api_temperature
+
+        # 默认反思 prompt（可通过参数覆盖）
+        self.reflection_system_prompt = reflection_system_prompt or self._default_reflection_system_prompt()
+        self.reflection_user_prompt_template = reflection_user_prompt_template or self._default_reflection_user_prompt_template()
+
         self._embedding_model: Optional[SentenceTransformer] = None
+        self._reflection_client: Optional[OpenAI] = None
         self._stored_records: list[_SessionRecord] = []
+        # 延迟存储的 session: (session, outcome, error_message)
+        self._pending_session_to_store: Optional[tuple[Session, str, str]] = None
 
     def _get_state_path(self) -> str:
         return os.path.join(self.get_state_dir(), "utilized_session_list.json")
@@ -115,6 +151,17 @@ class PreviousSampleEmbeddingCallback(Callback):
                     record.created_at = created_at
                 if embedding_payload is not None:
                     record.embedding = [float(v) for v in embedding_payload]
+                # 读取反思字段
+                reflection_payload = item.get("reflection") if isinstance(item, dict) else None
+                if reflection_payload:
+                    record.reflection = str(reflection_payload)
+                # 读取 outcome 和 error_message 字段
+                outcome_payload = item.get("outcome") if isinstance(item, dict) else None
+                if outcome_payload:
+                    record.outcome = str(outcome_payload)
+                error_message_payload = item.get("error_message") if isinstance(item, dict) else None
+                if error_message_payload:
+                    record.error_message = str(error_message_payload)
                 if not record.query_text:
                     extracted = self._extract_query_text(session)
                     record.query_text = extracted or ""
@@ -134,27 +181,46 @@ class PreviousSampleEmbeddingCallback(Callback):
 
     def on_task_complete(self, callback_args: CallbackArguments) -> None:
         current_session = callback_args.current_session
-        if not (
-            current_session.evaluation_record.outcome
-            == SessionEvaluationOutcome.CORRECT
-            and current_session.sample_status == SampleStatus.COMPLETED
-        ):
+
+        # 只记录 greedy 评估的轨迹，但延迟到 on_state_save 时才存储
+        # 这样可以避免在 GRPO 采样时召回到当前 query 自己的轨迹
+        finish_reason = getattr(current_session, 'finish_reason', None)
+        if finish_reason != "GREEDY_EVAL":
+            # 不是 greedy 评估，跳过
             return
-        query_text = self._extract_query_text(current_session) or ""
-        # DEBUG: Print the full query text being stored
-        query_display = query_text.replace("\n", "\\n")
-        SafeLogger.info(
-            f"[PreviousSampleEmbedding] STORING query for sample {current_session.sample_index}:\n{query_display}"
+
+        is_success = (
+            current_session.evaluation_record.outcome == SessionEvaluationOutcome.CORRECT
+            and current_session.sample_status == SampleStatus.COMPLETED
         )
-        embedding = self._encode_query(query_text) if query_text else None
-        record = _SessionRecord(
-            session=current_session.model_copy(deep=True),
-            query_text=query_text,
-            embedding=embedding.tolist() if embedding is not None else None,
-        )
-        self._stored_records.append(record)
-        if len(self._stored_records) > self.max_cached_session_count:
-            self._stored_records.pop(0)
+
+        if is_success:
+            # 成功轨迹
+            self._pending_session_to_store = (
+                current_session.model_copy(deep=True),
+                "success",
+                ""
+            )
+        elif self.store_failed_trajectories:
+            # 失败轨迹（仅当 store_failed_trajectories=True 时存储）
+            error_message = ""
+            if current_session.evaluation_record.outcome == SessionEvaluationOutcome.INCORRECT:
+                error_message = "Wrong answer"
+            elif current_session.evaluation_record.outcome == SessionEvaluationOutcome.UNKNOWN:
+                # 获取详细错误信息（如果有）
+                detail_dict = current_session.evaluation_record.detail_dict
+                if detail_dict:
+                    error_message = f"Evaluation error: {detail_dict}"
+                else:
+                    error_message = "Evaluation error"
+            elif current_session.sample_status != SampleStatus.COMPLETED:
+                error_message = f"Sample status: {current_session.sample_status.value}"
+
+            self._pending_session_to_store = (
+                current_session.model_copy(deep=True),
+                "failure",
+                error_message
+            )
 
     def on_session_create(self, callback_args: CallbackArguments) -> None:
         assert callback_args.current_session.chat_history.get_value_length() == 0
@@ -210,6 +276,41 @@ class PreviousSampleEmbeddingCallback(Callback):
         )
 
     def on_state_save(self, callback_args: CallbackArguments) -> None:
+        # GRPO 训练完成后，将暂存的 session 存入召回库
+        if self._pending_session_to_store is not None:
+            pending_session, outcome, error_message = self._pending_session_to_store
+            query_text = self._extract_query_text(pending_session) or ""
+            # DEBUG: Print the full query text being stored
+            query_display = query_text.replace("\n", "\\n")
+            SafeLogger.info(
+                f"[PreviousSampleEmbedding] STORING query for sample {pending_session.sample_index} "
+                f"(outcome={outcome}, after GRPO):\n{query_display}"
+            )
+            embedding = self._encode_query(query_text) if query_text else None
+
+            # 生成反思（如果启用）
+            reflection = ""
+            if self.enable_reflection and query_text:
+                agent_role_dict = callback_args.session_context.agent.get_role_dict()
+                trajectory_text = self._extract_trajectory_text(pending_session, agent_role_dict)
+                reflection = self._call_reflection_api(
+                    query_text, trajectory_text, outcome, error_message
+                ) or ""
+
+            record = _SessionRecord(
+                session=pending_session,
+                query_text=query_text,
+                embedding=embedding.tolist() if embedding is not None else None,
+                reflection=reflection,
+                outcome=outcome,
+                error_message=error_message,
+            )
+            self._stored_records.append(record)
+            if len(self._stored_records) > self.max_cached_session_count:
+                self._stored_records.pop(0)
+            self._pending_session_to_store = None  # 清空暂存
+
+        # 保存状态到文件
         state_path = self._get_state_path()
         os.makedirs(os.path.dirname(state_path), exist_ok=True)
         with open(state_path, "w", encoding="utf-8") as f:
@@ -375,19 +476,210 @@ class PreviousSampleEmbeddingCallback(Callback):
     ) -> str:
         if not records:
             return "\n"
-        parts = [
-            "\nBelow are prior trajectories related to the current query; use them as guidance before planning SQL:\n"
-        ]
-        for record in records:
-            question = record.query_text
-            if not question:
-                extracted = self._extract_query_text(record.session)
-                question = extracted or ""
-            try:
-                conversation = record.session.chat_history.get_value_str(
-                    agent_role_dict, start_index=3, end_index=None
-                )
-            except Exception:
-                conversation = ""
-            parts.append(f"Question {question}:\n{conversation}\n")
+
+        parts = []
+
+        # 如果启用 memory review，添加指导
+        if self.enable_memory_review:
+            memory_review_instruction = """
+Before solving the task, you MUST first review the retrieved memories and output your analysis in the following format:
+
+<memory_review>
+Analysis: [For each memory, explain whether it is relevant to the current task and why]
+- Memory 1: [relevant/irrelevant] because [reason]
+- Memory 2: [relevant/irrelevant] because [reason]
+...
+Decision: [Which memories will you follow? How will you adapt them to the current task?]
+confidence_score: [A float between 0.0 and 1.0 indicating how confident you are that the memories will help solve the current task. 0.0 means memories are not helpful at all, 1.0 means memories provide a direct solution]
+</memory_review>
+
+After the memory review, proceed with your solution.
+
+"""
+            parts.append(memory_review_instruction)
+            parts.append("Below are prior trajectories related to the current query:\n")
+
+            for i, record in enumerate(records):
+                question = record.query_text
+                if not question:
+                    extracted = self._extract_query_text(record.session)
+                    question = extracted or ""
+
+                if record.outcome == "success":
+                    # 成功轨迹：显示完整轨迹
+                    try:
+                        conversation = record.session.chat_history.get_value_str(
+                            agent_role_dict, start_index=3, end_index=None
+                        )
+                    except Exception:
+                        conversation = ""
+                    memory_text = f"[Memory {i+1}] [SUCCESS] Question: {question}\nTrajectory:\n{conversation}\n"
+                    if record.reflection:
+                        memory_text += f"\nInsight:\n{record.reflection}\n"
+                else:
+                    # 失败轨迹：只显示 question 和 insight，不显示错误的轨迹
+                    memory_text = f"[Memory {i+1}] [FAILURE] Question: {question}\n"
+                    if record.error_message:
+                        memory_text += f"Error: {record.error_message}\n"
+                    if record.reflection:
+                        memory_text += f"Lesson learned:\n{record.reflection}\n"
+                    else:
+                        memory_text += "(No insight available)\n"
+                parts.append(memory_text)
+        else:
+            # 原有逻辑
+            parts.append(
+                "\nBelow are prior trajectories related to the current query; use them as guidance before planning SQL:\n"
+            )
+            for record in records:
+                question = record.query_text
+                if not question:
+                    extracted = self._extract_query_text(record.session)
+                    question = extracted or ""
+
+                if record.outcome == "success":
+                    # 成功轨迹：显示完整轨迹
+                    try:
+                        conversation = record.session.chat_history.get_value_str(
+                            agent_role_dict, start_index=3, end_index=None
+                        )
+                    except Exception:
+                        conversation = ""
+                    memory_text = f"[SUCCESS] Question {question}:\n{conversation}\n"
+                    if record.reflection:
+                        memory_text += f"\nInsight:\n{record.reflection}\n"
+                else:
+                    # 失败轨迹：只显示 question 和 insight，不显示错误的轨迹
+                    memory_text = f"[FAILURE] Question {question}:\n"
+                    if record.error_message:
+                        memory_text += f"Error: {record.error_message}\n"
+                    if record.reflection:
+                        memory_text += f"Lesson learned:\n{record.reflection}\n"
+                    else:
+                        memory_text += "(No insight available)\n"
+                parts.append(memory_text)
+
         return "".join(parts)
+
+    # ------------------------------------------------------------------
+    # Reflection (反思/总结) 相关方法
+    # ------------------------------------------------------------------
+    def _default_reflection_system_prompt(self) -> str:
+        """默认的反思 system prompt"""
+        return """You are an expert AI Agent Analyst and Prompt Engineer specialized in optimizing Large Language Model agents for complex reasoning tasks (e.g., Text-to-SQL, Coding, Planning).
+Your goal is to analyze the execution trajectory of an agent and distill **generalizable, actionable insights** that can serve as "rules of thumb" to improve future performance on similar (but not identical) tasks."""
+
+    def _default_reflection_user_prompt_template(self) -> str:
+        """默认的反思 user prompt 模板，支持 {query}, {trajectory}, {outcome_status}, {error_message} 占位符"""
+        return """### Input Context
+**1. User Query:**
+{query}
+
+**2. Agent Trajectory:**
+{trajectory}
+
+**3. Evaluation Outcome:**
+{outcome_status}
+{error_message}
+
+---
+
+### Analysis Instructions (Chain of Thought)
+Please analyze the trajectory deeply and output a structured analysis. Follow these reasoning steps:
+
+**Step 1: Diagnosis (Root Cause Analysis)**
+* **If Failure:** pinpoint the *exact* turn where the logic diverged. Was it a syntax error? A hallucination of a column name? A logical gap? Did the agent misunderstand the schema?
+* **If Success:** Identify the *critical decision* or "Aha!" moment that made this solution work. Why was this path effective compared to potential pitfalls?
+
+**Step 2: Abstraction (Generalization)**
+* **DO NOT** just summarize "The agent wrote a SQL query." (This is useless).
+* **DO NOT** mention specific variable names (like `user_id = 5`) unless necessary for the rule pattern.
+* **DO** formulate a general heuristic.
+    * *Bad Insight:* "The agent forgot to join table A and B."
+    * *SOTA Insight:* "When querying metric X, always perform an INNER JOIN between A and B on 'id' to filter out incomplete records, as relying on implicit joins leads to ambiguous column errors."
+
+**Step 3: Refinement (Actionability)**
+* Condense the insight into a single, high-impact "Tip" (under 50 words) that can be injected into a future system prompt.
+* The insight must be self-contained.
+
+### Output Format
+You must output a valid JSON object strictly matching this schema:
+
+```json
+{{
+  "diagnosis_reasoning": "Your step-by-step analysis of the failure or success factors...",
+  "error_type": "Syntax Error | Logic Error | Schema Misunderstanding | Optimal Path | ...",
+  "insight": "The refined, generalizable rule or tip.",
+  "tags": ["relevant_tool_name", "relevant_concept"]
+}}
+```"""
+
+    def _call_reflection_api(
+        self, query: str, trajectory: str, outcome: str = "success", error_message: str = ""
+    ) -> Optional[str]:
+        """调用 API 生成结构化轨迹反思"""
+        if self._reflection_client is None:
+            api_key = os.getenv(self.reflection_api_key_env)
+            if not api_key:
+                SafeLogger.warning(
+                    f"[PreviousSampleEmbedding] Missing API key env: {self.reflection_api_key_env}"
+                )
+                return None
+            self._reflection_client = OpenAI(
+                api_key=api_key,
+                base_url=self.reflection_api_base_url
+            )
+
+        # 构建 outcome_status 字符串
+        outcome_status = "Success" if outcome == "success" else "Failure"
+        error_msg_str = error_message if error_message else ""
+
+        # 构建 user prompt，支持多种占位符格式
+        user_prompt = self.reflection_user_prompt_template.format(
+            query=query,
+            trajectory=trajectory,
+            outcome_status=outcome_status,
+            error_message=error_msg_str,
+            # 向后兼容：旧模板可能只用 {query} 和 {trajectory}
+        )
+
+        try:
+            # 构建 API 调用参数
+            api_kwargs = {
+                "model": self.reflection_api_model,
+                "messages": [
+                    {"role": "system", "content": self.reflection_system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            }
+            # 添加 temperature 参数（0.0 为贪婪解码）
+            if self.reflection_api_temperature is not None:
+                api_kwargs["temperature"] = self.reflection_api_temperature
+
+            completion = self._reflection_client.chat.completions.create(**api_kwargs)
+        except Exception as exc:
+            SafeLogger.error(f"[PreviousSampleEmbedding] Reflection API call failed: {exc}")
+            return None
+
+        choices = completion.choices if completion else None
+        if not choices:
+            return None
+
+        reflection = choices[0].message.content or ""
+        SafeLogger.info(f"[PreviousSampleEmbedding] Generated reflection: {reflection[:200]}...")
+        return reflection.strip()
+
+    def _extract_trajectory_text(self, session: Session, agent_role_dict: Mapping[Role, str]) -> str:
+        """提取轨迹文本用于反思"""
+        try:
+            return session.chat_history.get_value_str(
+                agent_role_dict, start_index=3, end_index=None
+            )
+        except Exception:
+            parts = []
+            for idx in range(session.chat_history.get_value_length()):
+                item = session.chat_history.get_item_deep_copy(idx)
+                role_name = agent_role_dict.get(item.role, item.role.value)
+                parts.append(f"{role_name}: {item.content.strip()}")
+            return "\n".join(parts)
+

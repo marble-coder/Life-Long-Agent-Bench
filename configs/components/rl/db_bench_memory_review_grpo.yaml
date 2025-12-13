@@ -1,0 +1,43 @@
+group_size: 4  # how many attempts per sample before one GRPO update
+best_metric_strategy: best_reward  # options: best_reward, best_reward_last
+
+generation:
+  do_sample: true
+  temperature: 0.8
+  top_p: 0.95
+  max_new_tokens: 512
+  num_beams: 1
+
+grpo:
+  beta: 0.04  # KL系数，防止模型偏离太远
+  clip_param: 0.2  # PPO clip参数
+  normalize_rewards: true  # 开启归一化，这是GRPO的核心（Group Relative）
+  use_best_of_n: false  # 关闭Best-of-N，使用全部4个样本
+  reference_model_path: null  # optional: path to frozen reference model
+
+# 新增：Memory Review 奖励配置
+reward:
+  alpha: 0.5    # confidence_score 权重，R = R_exec × (1 + α × confidence_score) + ...
+  beta: 0.1     # format 奖励权重（是否有正确的 <memory_review> 格式）
+  gamma: 0.2    # 轮数奖励权重（正确前提下，轮数越少越好）
+  max_rounds: 3 # 最大轮数，用于计算轮数奖励
+
+lora:
+  r: 64
+  alpha: 128
+  dropout: 0.05
+  target_modules: ["q_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+
+optim:
+  learning_rate: 2.0e-5
+  weight_decay: 0.01
+  max_grad_norm: 1
+  num_train_epochs: 1
+  gradient_accumulation_steps: 1
+
+save:
+  lora_output_dir: "outputs/{TIMESTAMP}/memory_review_grpo_lora"
+
+monitoring:
+  tensorboard: true
+  log_interval: 1

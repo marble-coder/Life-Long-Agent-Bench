@@ -94,6 +94,8 @@ class CallbackConstructor:
                     unique_flag = GRPOTrainingCallback.is_unique()
                 case GRPOTrainingCallbackRLLM.__name__:
                     unique_flag = GRPOTrainingCallbackRLLM.is_unique()
+                case MemoryReviewGRPOCallback.__name__:
+                    unique_flag = MemoryReviewGRPOCallback.is_unique()
                 case _:
                     raise NotImplementedError(
                         f"Callback {target_class_str} is not implemented or not handled in CallbackConstructor."

@@ -1,0 +1,4 @@
+memory_review_grpo_callback:
+  module: "src.callbacks.instance.memory_review_grpo_callback.MemoryReviewGRPOCallback"
+  parameters:
+    config_path: null  # GRPO config YAML path, set via custom_parameters

@@ -24,9 +24,9 @@ lora:
 optim:
   learning_rate: 2.0e-5
   weight_decay: 0.01
-  max_grad_norm: 1  # 梯度裁剪阈值（更保守）
-  num_train_epochs: 1
-  gradient_accumulation_steps: 1
+  max_grad_norm: 10  # 梯度裁剪阈值（更保守）
+  num_train_epochs: 2
+  gradient_accumulation_steps: 4
 
 save:
   lora_output_dir: "outputs/{TIMESTAMP}/grpo_rllm_lora"

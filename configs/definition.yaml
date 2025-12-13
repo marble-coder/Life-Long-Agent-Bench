@@ -30,6 +30,7 @@ callback_dict:
     - ./components/callbacks/test_time_grpo_callback.yaml #test-time GRPO online adaptation
     - ./components/callbacks/grpo_training_callback.yaml # GRPO + LoRA on-policy trainer
     - ./components/callbacks/grpo_training_callback_rllm.yaml # GRPO + LoRA using rllm/verl framework
+    - ./components/callbacks/memory_review_grpo_callback.yaml # Memory Review GRPO with confidence_score reward
 
 import:
   - ./components/logger.yaml

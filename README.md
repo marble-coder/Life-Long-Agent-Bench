@@ -1,13 +1,34 @@
 # run experiment
 # 设置环境变量
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-export CUDA_VISIBLE_DEVICES=0,2
+export CUDA_VISIBLE_DEVICES=0,5,6
 export PYTHONPATH=./
+export PYTHONPATH=./:./rllm:./verl
+
+# 跑kg任务
+docker run -dt \
+      --name virtuoso \
+      -p 3001:8890 \
+      -p 1111:1111 \
+      -e DBA_PASSWORD=dba \
+      -v $(pwd)/database/virtuoso_db:/database \
+      openlink/virtuoso-opensource-7 
+
 
 # 强制终止进程
 pkill -9 -f run_experiment.py
-# 运行实验
-python ./src/run_experiment.py --config_path "local_usc16_config.yaml"
+# 运行os实验
+python ./src/run_experiment.py --config_path "configs/assignments/experiments/llama_31_8b_instruct/instance/os_interaction/instance/standard.yaml"
+
+# 运行kg实验
+python ./src/run_experiment.py --config_path "configs/assignments/experiments/llama_31_8b_instruct/instance/knowledge_graph/instance/standard.yaml"
+
+# 运行grpo+召回4条轨迹
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export CUDA_VISIBLE_DEVICES=0,6,7
+export PYTHONPATH=./:./rllm:./verl
+python ./src/run_experiment.py --config_path "configs/assignments/experiments/llama_31_8b_instruct/instance/db_bench/instance/previous_sample_usc4_grpo_rllm.yaml"
+
 
 # SFT版本修改lora配置
 在configs/components/callbacks/test_time_training_callback.yaml路径下去修改相关参数
@@ -67,9 +88,11 @@ python ./src/run_experiment.py --config_path "configs/assignments/experiments/ll
 
 # 运行grpo_lora
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-export CUDA_VISIBLE_DEVICES=1,6  
-export PYTHONPATH=./:./rllm
+export CUDA_VISIBLE_DEVICES=3,4  
+export PYTHONPATH=./:./rllm:./verl
 python ./src/run_experiment.py --config_path "configs/assignments/experiments/llama_31_8b_instruct/instance/db_bench/instance/grpo.yaml" --max_samples 100
+
+python ./src/run_experiment.py --config_path "configs/assignments/experiments/llama_31_8b_instruct/instance/db_bench/instance/grpo_rllm.yaml" --max_samples 100
 
 
 # 运行grpo_lora+历史轨迹

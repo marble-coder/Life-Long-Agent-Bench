@@ -7,3 +7,13 @@ previous_sample_embedding_callback:
     embedding_device: "cpu"
     max_cached_session_count: 64
     min_similarity: -0.2
+    enable_memory_review: false  # 设为 true 启用 memory review 指导
+    store_failed_trajectories: false  # 设为 true 同时存储失败轨迹
+    # 反思功能参数
+    enable_reflection: false  # 设为 true 启用轨迹反思/总结
+    reflection_api_model: "qwen-plus"
+    reflection_api_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    reflection_api_key_env: "DASHSCOPE_API_KEY"
+    reflection_api_temperature: 0.0  # 温度，0.0 为贪婪解码，null 使用 API 默认值
+    reflection_system_prompt: null  # 自定义 system prompt，null 使用默认
+    reflection_user_prompt_template: null  # 自定义 user prompt 模板，null 使用默认

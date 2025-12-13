@@ -39,6 +39,10 @@ try:
     from src.callbacks.instance import GRPOTrainingCallbackRLLM
 except Exception:
     GRPOTrainingCallbackRLLM = None  # type: ignore
+try:
+    from src.callbacks.instance import MemoryReviewGRPOCallback
+except Exception:
+    MemoryReviewGRPOCallback = None  # type: ignore
 
 
 class ConfigUtilityCaller(StrEnum):
@@ -377,12 +381,17 @@ def main() -> None:
         session_list = []
         unfinished_sample_order = assignment_config.sample_order
     callback_handler = CallbackHandler(callback_dict)
-    # 检测是否启用GRPO训练（支持原版和RLLM版本）
+    # 检测是否启用GRPO训练（支持原版、RLLM版本和MemoryReview版本）
     enable_grpo = any(
         (GRPOTrainingCallback is not None and isinstance(cb, GRPOTrainingCallback)) or
-        (GRPOTrainingCallbackRLLM is not None and isinstance(cb, GRPOTrainingCallbackRLLM))
+        (GRPOTrainingCallbackRLLM is not None and isinstance(cb, GRPOTrainingCallbackRLLM)) or
+        (MemoryReviewGRPOCallback is not None and isinstance(cb, MemoryReviewGRPOCallback))
         for cb in callback_dict.values()
     )
+    # DEBUG: 打印 callback 类型和 enable_grpo 状态
+    logger.info(f"[DEBUG] Callbacks loaded: {[(k, type(v).__name__) for k, v in callback_dict.items()]}")
+    logger.info(f"[DEBUG] MemoryReviewGRPOCallback class: {MemoryReviewGRPOCallback}")
+    logger.info(f"[DEBUG] enable_grpo = {enable_grpo}")
     # Apply sample limit if provided
     if args.max_samples is not None and args.max_samples > 0:
         unfinished_sample_order = unfinished_sample_order[: args.max_samples]
@@ -431,7 +440,10 @@ def main() -> None:
         setattr(agent, "_force_greedy", True)
         # Temporarily ask GRPO callbacks to skip override
         grpo_callbacks = [
-            cb for cb in callback_dict.values() if GRPOTrainingCallback is not None and isinstance(cb, GRPOTrainingCallback)
+            cb for cb in callback_dict.values()
+            if (GRPOTrainingCallback is not None and isinstance(cb, GRPOTrainingCallback)) or
+               (GRPOTrainingCallbackRLLM is not None and isinstance(cb, GRPOTrainingCallbackRLLM)) or
+               (MemoryReviewGRPOCallback is not None and isinstance(cb, MemoryReviewGRPOCallback))
         ]
         for cb in grpo_callbacks:
             cb.skip_override = True  # type: ignore[attr-defined]
