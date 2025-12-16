@@ -11,9 +11,35 @@ previous_sample_embedding_callback:
     store_failed_trajectories: false  # 设为 true 同时存储失败轨迹
     # 反思功能参数
     enable_reflection: false  # 设为 true 启用轨迹反思/总结
+    reflection_use_local_model: false  # 设为 true 使用本地模型，false 使用 API
+    reflection_local_model_path: null  # 本地模型路径，如 /mnt/ssd2/models/Qwen2.5-7B-Instruct
+    reflection_local_model_device: "cuda"  # 本地模型设备
+    reflection_local_do_sample: false  # 本地模型是否采样，false 为贪婪解码
     reflection_api_model: "qwen-plus"
     reflection_api_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
     reflection_api_key_env: "DASHSCOPE_API_KEY"
     reflection_api_temperature: 0.0  # 温度，0.0 为贪婪解码，null 使用 API 默认值
+    reflection_api_seed: 42  # 随机种子，固定输出，null 不固定
     reflection_system_prompt: null  # 自定义 system prompt，null 使用默认
     reflection_user_prompt_template: null  # 自定义 user prompt 模板，null 使用默认
+    reflection_enable_thinking: false  # 反思时是否启用思考模式
+    reflection_thinking_budget_tokens: null  # 反思思考 token 预算，null 使用 API 默认值
+    reflection_max_new_tokens: 1024  # 本地模型最大生成 token 数
+    # Rerank 功能参数
+    enable_rerank: false  # 设为 true 启用 API rerank
+    rerank_candidate_count: 10  # embedding 召回的候选数量，从中选 utilized_sample_count 个
+    rerank_use_local_model: false  # 设为 true 使用本地模型，false 使用 API
+    rerank_local_model_path: null  # 本地模型路径（可与 reflection 共用同一个）
+    rerank_local_model_device: "cuda"  # 本地模型设备
+    rerank_local_do_sample: false  # 本地模型是否采样，false 为贪婪解码
+    rerank_api_model: "qwen-plus"
+    rerank_api_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    rerank_api_key_env: "DASHSCOPE_API_KEY"
+    rerank_api_temperature: 0.0
+    rerank_api_seed: 42  # 随机种子，固定输出，null 不固定
+    rerank_system_prompt: null  # 自定义 rerank system prompt，null 使用默认
+    rerank_user_prompt_template: null  # 自定义 rerank user prompt 模板，null 使用默认
+    rerank_enable_thinking: false  # rerank 时是否启用思考模式
+    rerank_thinking_budget_tokens: null  # rerank 思考 token 预算，null 使用 API 默认值
+    rerank_include_guidance: true  # 是否将 rerank guidance 添加到 prompt
+    rerank_max_new_tokens: 512  # 本地模型最大生成 token 数

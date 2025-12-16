@@ -1,0 +1,157 @@
+import:
+  - ../task.yaml
+  - ../../../agent.yaml
+  - ../../../../../../definition.yaml
+
+assignment_config:
+  callback_dict:
+    callback_0:
+      name: current_session_saving_callback
+    callback_1:
+      name: consecutive_abnormal_agent_inference_process_handling_callback
+    callback_2:
+      name: previous_sample_embedding_callback
+      custom_parameters:
+        utilized_sample_count: 4  # 最终选择 top4 轨迹
+        max_cached_session_count: 500
+        embedding_model_name: /mnt/ssd2/models/Qwen3-Embedding-4B
+        embedding_device: cuda
+        min_similarity: -100
+        enable_memory_review: false
+        store_failed_trajectories: false  # 只存储成功轨迹
+        # 启用 Rerank 功能
+        enable_rerank: true
+        rerank_include_guidance: false
+        rerank_use_local_model: false  # 设为 true 使用本地模型，false 使用 API
+        rerank_local_model_path: /mnt/ssd2/models/Qwen2.5-7B-Instruct  # 本地模型路径（可与 reflection 共用同一个）
+        rerank_local_model_device: "auto"  # 本地模型设备
+        rerank_local_do_sample: false  # 本地模型是否采样，false 为贪婪解码
+        rerank_enable_thinking: false
+        rerank_candidate_count: 20  # embedding 粗召回 top10
+        rerank_api_model: "deepseek-v3.2"
+        rerank_api_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        rerank_api_key_env: "DASHSCOPE_API_KEY"
+        rerank_api_temperature: 0.0
+        # Rerank system prompt
+        rerank_system_prompt: |
+          You are an expert AI assistant specialized in selecting and synthesizing relevant historical examples for Text-to-SQL tasks.
+
+          Your task is to:
+          1. Analyze the current query and candidate historical trajectories
+          2. Select the TOP-4 most relevant trajectories that will help solve the current task
+          3. Generate a concise "How to Use" guidance explaining how to apply the selected trajectories to the current task
+
+          Focus on:
+          - Semantic similarity between queries (similar question types, aggregation patterns)
+          - Schema/table structure similarity
+          - SQL pattern applicability (JOINs, aggregations, subqueries, window functions, etc.)
+          - Potential pitfalls to avoid based on past solutions
+        # Rerank user prompt template
+        rerank_user_prompt_template: |
+          ### Current Task
+          **Query:** {current_query}
+
+          ### Candidate Historical Trajectories
+          Below are {candidate_count} candidate trajectories retrieved by embedding similarity. Please select the TOP {top_k} most relevant ones.
+
+          {candidates}
+
+          ---
+
+          ### Instructions
+          1. Analyze each candidate's relevance to the current task based on:
+             - Question type similarity (e.g., percentage calculation, ranking, filtering)
+             - SQL pattern applicability
+             - Schema understanding requirements
+          2. Select exactly {top_k} trajectories that are most helpful
+          3. Generate a "How to Use" guidance for applying these trajectories
+
+          ### Output Format
+          You must output a valid JSON object strictly matching this schema:
+
+          ```json
+          {{{{
+            "selected_indices": [1, 3, 5, 7],
+            "reasoning": "Brief explanation of why these were selected...",
+            "guidance": "How to use these historical examples for the current task: ..."
+          }}}}
+          ```
+
+          Notes:
+          - `selected_indices` should contain exactly {top_k} numbers (1-indexed)
+          - `guidance` should be a concise, actionable instruction (under 100 words) that tells the model how to leverage the selected examples
+          - Focus on SQL patterns and common pitfalls in the guidance
+        # 启用反思功能 - 详细 insight 提取
+        enable_reflection: true
+        reflection_use_local_model: true
+        reflection_local_model_path: /mnt/ssd2/models/Qwen2.5-7B-Instruct
+        reflection_local_model_device: "auto"  # 本地模型设备
+        reflection_local_do_sample: false 
+        reflection_enable_thinking: false
+        #reflection_api_model: "deepseek-ai/DeepSeek-V3.2"
+        #reflection_api_base_url: "https://api.siliconflow.cn/v1"
+        reflection_api_model: "deepseek-v3.2"
+        reflection_api_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        reflection_api_seed: 42
+        reflection_api_temperature: 0.0
+        reflection_api_key_env: "DASHSCOPE_API_KEY"
+        # System prompt
+        reflection_system_prompt: |
+          You are an expert AI Agent Analyst and Prompt Engineer specialized in optimizing Large Language Model agents for complex reasoning tasks (e.g., Text-to-SQL, Coding, Planning).
+          Your goal is to analyze the execution trajectory of an agent and distill **generalizable, actionable insights** that can serve as "rules of thumb" to improve future performance on similar (but not identical) tasks.
+        # User prompt: Chain of Thought 分析
+        reflection_user_prompt_template: |
+          ### Input Context
+          **1. User Query:**
+          {query}
+
+          **2. Agent Trajectory:**
+          {trajectory}
+
+          **3. Evaluation Outcome:**
+          {outcome_status}
+          {error_message}
+
+          ---
+
+          ### Analysis Instructions (Chain of Thought)
+          Please analyze the trajectory deeply and output a structured analysis. Follow these reasoning steps:
+
+          **Step 1: Diagnosis (Root Cause Analysis)**
+          * **If Failure:** pinpoint the *exact* turn where the logic diverged. Was it a syntax error? A hallucination of a column name? A logical gap? Did the agent misunderstand the schema?
+          * **If Success:** Identify the *critical decision* or "Aha!" moment that made this solution work. Why was this path effective compared to potential pitfalls?
+
+          **Step 2: Abstraction (Generalization)**
+          * **DO NOT** just summarize "The agent wrote a SQL query." (This is useless).
+          * **DO NOT** mention specific variable names (like `user_id = 5`) unless necessary for the rule pattern.
+          * **DO** formulate a general heuristic.
+              * *Bad Insight:* "The agent forgot to join table A and B."
+              * *SOTA Insight:* "When querying metric X, always perform an INNER JOIN between A and B on 'id' to filter out incomplete records, as relying on implicit joins leads to ambiguous column errors."
+
+          **Step 3: Refinement (Actionability)**
+          * Condense the insight into a single, high-impact "Tip" (under 50 words) that can be injected into a future system prompt.
+          * The insight must be self-contained.
+
+          ### Output Format
+          You must output a valid JSON object strictly matching this schema:
+
+          ```json
+          {{
+            "diagnosis_reasoning": "Your step-by-step analysis of the failure or success factors...",
+            "error_type": "Syntax Error | Logic Error | Schema Misunderstanding | Optimal Path | ...",
+            "insight": "The refined, generalizable rule or tip.",
+            "tags": ["relevant_tool_name", "relevant_concept"]
+          }}
+          ```
+  output_dir: outputs/{TIMESTAMP}
+  sample_order: default
+
+environment_config:
+  use_task_client_flag: false
+
+task_dict:
+  db_bench:
+    parameters:
+      chat_history_item_factory:
+        parameters:
+          chat_history_item_dict_path: ./chat_history_items/previous_sample_utilization/db_bench.json
