@@ -1,0 +1,16 @@
+trajectory_memory_callback:
+  module: src.callbacks.instance.trajectory_memory_callback.TrajectoryMemoryCallback
+  parameters:
+    api_model: "qwen-plus"
+    api_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    api_key_env: "DASHSCOPE_API_KEY"
+    summary_max_items: 3
+    top_k: 3
+    max_memory_items: 10000
+    min_similarity: 0.0
+    embedding_model_name: "sentence-transformers/all-MiniLM-L6-v2"
+    embedding_device: "cuda"
+    inject_marker: null
+    inject_end_marker: null
+    prompt_config_path: null
+    require_completed_status: false

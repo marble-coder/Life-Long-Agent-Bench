@@ -1,0 +1,57 @@
+## Example Task 1
+Task: Find all employees in the Sales department
+Trajectory:
+Step 1: SELECT * FROM employees WHERE department = 'Sales'
+Observation: 12 rows returned
+Final Answer: SELECT * FROM employees WHERE department = 'Sales'
+
+## Example Task 2
+Task: Count how many orders each customer has made
+Trajectory:
+Step 1: SELECT customer_id, COUNT(*) FROM orders GROUP BY customer_id
+Observation: 50 rows returned
+Final Answer: SELECT customer_id, COUNT(*) FROM orders GROUP BY customer_id
+
+## Example Task 3
+Task: Find products that cost more than $100
+Trajectory:
+Step 1: SELECT * FROM products WHERE price > 100
+Observation: 23 rows returned
+Final Answer: SELECT * FROM products WHERE price > 100
+
+## Example Task 4
+Task: Get the total revenue by product category
+Trajectory:
+Step 1: SELECT category, SUM(price * quantity) as total_revenue FROM products JOIN order_items ON products.id = order_items.product_id GROUP BY category
+Observation: 8 rows returned
+Final Answer: SELECT category, SUM(price * quantity) as total_revenue FROM products JOIN order_items ON products.id = order_items.product_id GROUP BY category
+
+## Example Task 5
+Task: List all customers who have placed more than 5 orders
+Trajectory:
+Step 1: SELECT customer_id, COUNT(*) as order_count FROM orders GROUP BY customer_id HAVING COUNT(*) > 5
+Observation: 15 rows returned
+Final Answer: SELECT customer_id, COUNT(*) as order_count FROM orders GROUP BY customer_id HAVING COUNT(*) > 5
+
+Summary Workflows:
+
+# Workflow 1: Filter records by single condition
+1. SELECT * FROM <table_name> WHERE <column_name> = '<value>'
+2. Verify the result contains expected records
+
+# Workflow 2: Filter records by comparison condition
+1. SELECT * FROM <table_name> WHERE <column_name> > <value>
+2. Check the filtered results match the criteria
+
+# Workflow 3: Aggregate data with GROUP BY and COUNT
+1. SELECT <group_column>, COUNT(*) FROM <table_name> GROUP BY <group_column>
+2. Analyze the counts for each group
+
+# Workflow 4: Join tables and aggregate
+1. SELECT <column>, SUM(<value_column>) FROM <table1> JOIN <table2> ON <table1>.<key> = <table2>.<key> GROUP BY <column>
+2. Review the aggregated results from joined tables
+
+# Workflow 5: Filter aggregated results with HAVING
+1. SELECT <column>, COUNT(*) FROM <table_name> GROUP BY <column> HAVING COUNT(*) > <threshold>
+2. Examine groups that meet the threshold condition
+

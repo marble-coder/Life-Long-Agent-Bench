@@ -1,0 +1,26 @@
+import:
+- ../task.yaml
+- ../../../agent_sampling.yaml
+- ../../../../../../definition.yaml
+
+assignment_config:
+  callback_dict:
+    callback_0:
+      name: current_session_saving_callback
+    callback_1:
+      name: consecutive_abnormal_agent_inference_process_handling_callback
+    callback_3:
+      name: test_time_grpo_callback
+      custom_parameters:
+        rollout_n: 4
+        temperature: 0.8
+        top_p: 0.95
+        max_new_tokens: 512
+        learning_rate: 1.0e-5
+        ppo_epochs: 1
+        norm_adv_by_std: true
+  output_dir: outputs/{TIMESTAMP}
+  sample_order: default
+
+environment_config:
+  use_task_client_flag: false

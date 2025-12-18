@@ -1,0 +1,86 @@
+import:
+  - ../task.yaml
+  - ../../../agent.yaml
+  - ../../../../../../definition.yaml
+
+assignment_config:
+  callback_dict:
+    callback_0:
+      name: current_session_saving_callback
+    callback_1:
+      name: consecutive_abnormal_agent_inference_process_handling_callback
+    callback_2:
+      name: previous_sample_embedding_callback
+      custom_parameters:
+        utilized_sample_count: 4  # 召回 top4 轨迹
+        max_cached_session_count: 500
+        embedding_model_name: /mnt/ssd2/models/Qwen3-Embedding-4B
+        embedding_device: cuda
+        min_similarity: -100
+        enable_memory_review: false
+        store_failed_trajectories: false  # 只存储成功轨迹
+        # 启用反思功能 - 详细 insight 提取
+        enable_reflection: false
+        reflection_api_model: "deepseek-ai/DeepSeek-V3.2"
+        reflection_api_base_url: "https://api.siliconflow.cn/v1"
+        reflection_api_key_env: "DASHSCOPE_API_KEY"
+        # System prompt
+        reflection_system_prompt: |
+          You are an expert AI Agent Analyst and Prompt Engineer specialized in optimizing Large Language Model agents for complex reasoning tasks (e.g., Text-to-SQL, Coding, Planning).
+          Your goal is to analyze the execution trajectory of an agent and distill **generalizable, actionable insights** that can serve as "rules of thumb" to improve future performance on similar (but not identical) tasks.
+        # User prompt: Chain of Thought 分析
+        reflection_user_prompt_template: |
+          ### Input Context
+          **1. User Query:**
+          {query}
+
+          **2. Agent Trajectory:**
+          {trajectory}
+
+          **3. Evaluation Outcome:**
+          {outcome_status}
+          {error_message}
+
+          ---
+
+          ### Analysis Instructions (Chain of Thought)
+          Please analyze the trajectory deeply and output a structured analysis. Follow these reasoning steps:
+
+          **Step 1: Diagnosis (Root Cause Analysis)**
+          * **If Failure:** pinpoint the *exact* turn where the logic diverged. Was it a syntax error? A hallucination of a column name? A logical gap? Did the agent misunderstand the schema?
+          * **If Success:** Identify the *critical decision* or "Aha!" moment that made this solution work. Why was this path effective compared to potential pitfalls?
+
+          **Step 2: Abstraction (Generalization)**
+          * **DO NOT** just summarize "The agent wrote a SQL query." (This is useless).
+          * **DO NOT** mention specific variable names (like `user_id = 5`) unless necessary for the rule pattern.
+          * **DO** formulate a general heuristic.
+              * *Bad Insight:* "The agent forgot to join table A and B."
+              * *SOTA Insight:* "When querying metric X, always perform an INNER JOIN between A and B on 'id' to filter out incomplete records, as relying on implicit joins leads to ambiguous column errors."
+
+          **Step 3: Refinement (Actionability)**
+          * Condense the insight into a single, high-impact "Tip" (under 50 words) that can be injected into a future system prompt.
+          * The insight must be self-contained.
+
+          ### Output Format
+          You must output a valid JSON object strictly matching this schema:
+
+          ```json
+          {{
+            "diagnosis_reasoning": "Your step-by-step analysis of the failure or success factors...",
+            "error_type": "Syntax Error | Logic Error | Schema Misunderstanding | Optimal Path | ...",
+            "insight": "The refined, generalizable rule or tip.",
+            "tags": ["relevant_tool_name", "relevant_concept"]
+          }}
+          ```
+  output_dir: outputs/{TIMESTAMP}
+  sample_order: default
+
+environment_config:
+  use_task_client_flag: false
+
+task_dict:
+  db_bench:
+    parameters:
+      chat_history_item_factory:
+        parameters:
+          chat_history_item_dict_path: ./chat_history_items/previous_sample_utilization/db_bench.json

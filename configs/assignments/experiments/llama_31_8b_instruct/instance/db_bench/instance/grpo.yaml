@@ -1,0 +1,21 @@
+import:
+  - ../task.yaml
+  - ../../../agent.yaml
+  - ../../../../../../definition.yaml
+
+assignment_config:
+  callback_dict:
+    callback_0:
+      name: current_session_saving_callback
+    callback_1:
+      name: consecutive_abnormal_agent_inference_process_handling_callback
+    callback_grpo:
+      name: grpo_training_callback
+      custom_parameters:
+        # 覆盖默认的GRPO超参配置文件，便于直接修改
+        config_path: "./configs/components/rl/db_bench_grpo.yaml"
+  output_dir: outputs/{TIMESTAMP}
+  sample_order: default
+
+environment_config:
+  use_task_client_flag: false
