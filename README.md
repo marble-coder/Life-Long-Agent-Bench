@@ -23,7 +23,7 @@ echo "✅ 清理完成！当前 MySQL 容器："
 docker ps -a | grep mysql || echo "无"
 
 # 运行llama3-8b的memory+召回实验
-export DASHSCOPE_API_KEY=sk-30949268f306427886e6613da83a9e08
+export DASHSCOPE_API_KEY=sk-umjcynnsnunlyumgcdhuzdeorkldwwgsyfjokuvyogeskqnk
 python ./src/run_experiment.py --config_path "configs/assignments/experiments/llama_31_8b_instruct/instance/db_bench/instance/trajectory_memory_usc16.yaml"
 
 # 运行test-time-training只训练assistant部分实验
