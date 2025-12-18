@@ -13,6 +13,14 @@ from torch.optim import AdamW
 from rllm.parser import ChatTemplateParser
 from rllm.agents.utils import convert_messages_to_tokens_and_masks
 
+# 尝试导入 verl 的核心函数（用于对齐）
+try:
+    import verl.utils.torch_functional as verl_F
+    VERL_AVAILABLE = True
+except ImportError:
+    VERL_AVAILABLE = False
+    print("[WARNING] verl not available, using manual implementation")
+
 from src.callbacks.callback import Callback, CallbackArguments
 from src.typings import (
     Session,
