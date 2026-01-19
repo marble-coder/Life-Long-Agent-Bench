@@ -13,13 +13,13 @@ from torch.optim import AdamW
 from rllm.parser import ChatTemplateParser
 from rllm.agents.utils import convert_messages_to_tokens_and_masks
 
-# 尝试导入 verl 的核心函数（用于对齐）
-try:
-    import verl.utils.torch_functional as verl_F
-    VERL_AVAILABLE = True
-except ImportError:
-    VERL_AVAILABLE = False
-    print("[WARNING] verl not available, using manual implementation")
+# verl 核心算法（完全对齐 verl 的 loss 计算）
+from verl.trainer.ppo.core_algos import (
+    compute_policy_loss,
+    kl_penalty,
+    agg_loss,
+)
+import verl.utils.torch_functional as verl_F
 
 from src.callbacks.callback import Callback, CallbackArguments
 from src.typings import (
@@ -85,9 +85,10 @@ class GRPOTrainingCallback(Callback):
         self.system_prompt: str = ""
         self.skip_override: bool = False
         self.chat_parser = None
+        # 日志头部（对齐 verl 格式）
         self._log_header = (
-            "global_step\tsample_index\tattempt_idx\tloss_total\tloss_policy\tloss_kl\t"
-            "reward\tgroup_acc\ttrain_started\n"
+            "global_step\tsample_index\tepoch\tloss_total\tpg_loss\tkl_loss\t"
+            "ppo_kl\tclipfrac\tmean_reward\tmean_adv\tgroup_acc\n"
         )
 
         # 新增：缓存采样时的logprobs
@@ -411,6 +412,13 @@ class GRPOTrainingCallback(Callback):
         return reward
 
     def _train_on_group(self, sample_index: str | int, callback_args: CallbackArguments) -> None:
+        """
+        完全对齐 verl 的 GRPO 训练：
+        1. 批处理所有 attempts（padding + response_mask）
+        2. 使用 verl 的 compute_policy_loss（dual-clip PPO）
+        3. 使用 verl 的 kl_penalty（k3 模式）
+        4. 使用 agg_loss 进行 token-mean 聚合
+        """
         assert self.policy_model is not None
         assert self.optimizer is not None
         attempts = self.pending_attempts[sample_index]
@@ -420,136 +428,161 @@ class GRPOTrainingCallback(Callback):
             self.log_path = os.path.join(self.get_state_dir(), "train_log.tsv")
         self._ensure_log_header()
         device = self.device
-        normalize = bool(self.grpo_config.get("normalize_rewards", False))
+
+        # ==================== GRPO Advantage 计算（对齐 verl） ====================
         raw_rewards = torch.tensor(
             [a.reward for a in attempts], device=device, dtype=torch.float32
         )
-        # GRPO样本选择策略
-        use_best_of_n = self.grpo_config.get("use_best_of_n", False)
-        if use_best_of_n and len(attempts) > 1:
-            # Best-of-N模式：选择最佳和最差进行对比学习
-            # 注意：这种模式下只有2个样本，归一化会强制变成[+1, -1]
-            best_idx = raw_rewards.argmax().item()
-            worst_idx = raw_rewards.argmin().item()
-            # 使用最佳和最差形成对比（只要有差异就训练）
-            if raw_rewards[best_idx] != raw_rewards[worst_idx]:
-                train_attempts = [attempts[best_idx], attempts[worst_idx]]
-                train_rewards = torch.tensor([raw_rewards[best_idx], raw_rewards[worst_idx]], device=device)
-            else:
-                # 全部样本奖励相同，跳过训练（没有相对差异）
-                return
-        else:
-            # 标准GRPO模式：使用全部样本进行相对比较
-            train_attempts = attempts
-            train_rewards = raw_rewards
 
-        # GRPO核心：奖励归一化（实现Group Relative）
-        if normalize and len(train_rewards) > 1:
-            reward_std = train_rewards.std().item()
-            if reward_std > 1e-8:  # 有方差才归一化
-                rewards = (train_rewards - train_rewards.mean()) / (train_rewards.std() + 1e-8)
-            else:
-                # 完全相同的奖励，跳过训练（没有学习信号）
-                return
+        # GRPO 组内归一化（对齐 verl compute_grpo_outcome_advantage）
+        epsilon = 1e-6
+        if len(raw_rewards) == 1:
+            # 单样本：advantage = 0，无学习信号
+            advantages = torch.zeros_like(raw_rewards)
         else:
-            rewards = train_rewards
+            reward_mean = raw_rewards.mean()
+            reward_std = raw_rewards.std()
+            if reward_std < epsilon:
+                # 方差过小，跳过训练
+                print(f"[GRPO] Skipping group {sample_index}: reward std too small ({reward_std:.6f})")
+                return
+            advantages = (raw_rewards - reward_mean) / (reward_std + epsilon)
+
+        # 超参数（对齐 verl）
         beta = float(self.grpo_config.get("beta", 0.04))
-        clip_param = float(self.grpo_config.get("clip_param", 0.2))
-        grad_accum = int(self.optim_config.get("gradient_accumulation_steps", 1))
+        clip_ratio = float(self.grpo_config.get("clip_param", 0.2))
+        clip_ratio_c = float(self.grpo_config.get("clip_ratio_c", 3.0))  # dual-clip
+        kl_penalty_mode = str(self.grpo_config.get("kl_penalty_mode", "k3"))
+        loss_agg_mode = str(self.grpo_config.get("loss_agg_mode", "token-mean"))
         max_grad_norm = float(self.optim_config.get("max_grad_norm", 1.0))
         num_epochs = int(self.optim_config.get("num_train_epochs", 1))
         save_dir = self.save_config.get("lora_output_dir")
+
+        # 统计信息
         group_acc = float((raw_rewards > 0).float().mean().item())
-        train_started_flag = 1
+
+        # ==================== 构建批处理张量（对齐 verl batch 格式） ====================
+        batch_size = len(attempts)
+        # 获取每个 response 的长度（只计算 action tokens）
+        response_lengths = [a.gen_logprobs.shape[0] for a in attempts]
+        max_response_len = max(response_lengths)
+
+        # 初始化 batched tensors: (batch_size, max_response_len)
+        old_log_prob = torch.zeros(batch_size, max_response_len, device=device)
+        ref_log_prob = torch.zeros(batch_size, max_response_len, device=device)
+        response_mask = torch.zeros(batch_size, max_response_len, device=device)
+        # 优势广播到 token 级别（对齐 verl: scores.unsqueeze(-1) * response_mask）
+        token_level_advantages = torch.zeros(batch_size, max_response_len, device=device)
+
+        for i, attempt in enumerate(attempts):
+            seq_len = response_lengths[i]
+            # old_log_prob: 采样时的 logprobs（用于 PPO ratio）
+            if attempt.sampling_logprobs is not None:
+                old_log_prob[i, :seq_len] = attempt.sampling_logprobs.to(device)
+            else:
+                old_log_prob[i, :seq_len] = attempt.gen_logprobs.to(device)
+            # ref_log_prob: 参考模型的 logprobs（用于 KL penalty）
+            ref_log_prob[i, :seq_len] = attempt.ref_logprobs.to(device)
+            # response_mask: 标记有效 token（只有 assistant/agent tokens）
+            response_mask[i, :seq_len] = 1.0
+            # 优势广播到 token 级别
+            token_level_advantages[i, :seq_len] = advantages[i]
+
+        # 保存原始数据用于 forward
+        input_ids_list = [a.input_ids.to(device) for a in attempts]
+        attention_mask_list = [a.attention_mask.to(device) for a in attempts]
+        action_mask_list = [a.action_mask.to(device) for a in attempts]
 
         self.policy_model.train()
         step_count = 0
-        for _ in range(num_epochs):
-            backward_calls = 0
-            for idx, attempt in enumerate(train_attempts):
-                action_mask = attempt.action_mask.to(device)
-                if action_mask.sum().item() == 0:
-                    continue
-                input_ids = attempt.input_ids.to(device)
-                attention_mask = attempt.attention_mask.to(device)
+
+        for epoch in range(num_epochs):
+            # ==================== 重新计算 new_log_prob ====================
+            new_log_prob = torch.zeros(batch_size, max_response_len, device=device)
+            for i in range(batch_size):
+                input_ids = input_ids_list[i]
+                attention_mask = attention_mask_list[i]
+                action_mask = action_mask_list[i]
+
                 token_logps_full = self._token_logprobs(
                     self.policy_model, input_ids, attention_mask, enable_grad=True
                 )
                 action_mask_shift = action_mask[:, 1:]
-                new_logps = token_logps_full[action_mask_shift]
-                # 使用采样时的logprobs计算PPO ratio（关键修复！）
-                old_logps = attempt.sampling_logprobs.to(device) if attempt.sampling_logprobs is not None else attempt.gen_logprobs.to(device)
-                ref_logps = attempt.ref_logprobs.to(device)
+                seq_logps = token_logps_full[action_mask_shift]  # (response_len,)
+                seq_len = seq_logps.shape[0]
+                new_log_prob[i, :seq_len] = seq_logps
 
-                # 计算PPO ratio（数值稳定版本）
-                logp_diff = new_logps - old_logps
-                # 限制logp差异范围，避免exp爆炸
-                logp_diff = torch.clamp(logp_diff, -20.0, 20.0)
-                ratio = torch.exp(logp_diff)
-                clipped_ratio = torch.clamp(ratio, 1 - clip_param, 1 + clip_param)
+            # ==================== 使用 verl 的 compute_policy_loss ====================
+            pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = compute_policy_loss(
+                old_log_prob=old_log_prob,
+                log_prob=new_log_prob,
+                advantages=token_level_advantages,
+                response_mask=response_mask,
+                cliprange=clip_ratio,
+                cliprange_low=clip_ratio,
+                cliprange_high=clip_ratio,
+                clip_ratio_c=clip_ratio_c,
+                loss_agg_mode=loss_agg_mode,
+            )
 
-                # 获取对应的advantage
-                advantage = rewards[idx] if idx < len(rewards) else rewards[-1]
-                policy_component = torch.min(ratio * advantage, clipped_ratio * advantage)
+            # ==================== 使用 verl 的 kl_penalty（k3 模式） ====================
+            # kl_penalty 返回 per-token KL: (batch_size, max_response_len)
+            per_token_kl = kl_penalty(
+                logprob=new_log_prob,
+                ref_logprob=ref_log_prob,
+                kl_penalty=kl_penalty_mode,
+            )
+            # 聚合 KL loss
+            kl_loss = agg_loss(
+                loss_mat=per_token_kl,
+                loss_mask=response_mask,
+                loss_agg_mode=loss_agg_mode,
+            )
 
-                # KL散度惩罚（数值稳定版本）
-                # KL(π_ref || π_new) ≈ (ratio_ref - 1) - log(ratio_ref)
-                logp_ref_diff = new_logps - ref_logps
-                logp_ref_diff = torch.clamp(logp_ref_diff, -20.0, 20.0)  # 限制范围
-                ratio_ref = torch.exp(logp_ref_diff)
-                # 使用数值稳定的KL计算
-                per_token_kl = ratio_ref - logp_ref_diff - 1.0
+            # ==================== 总 Loss ====================
+            total_loss = pg_loss + beta * kl_loss
 
-                policy_loss = -policy_component.mean()
-                kl_loss = beta * per_token_kl.mean()
-
-                # 额外的loss clip保护
-                policy_loss = torch.clamp(policy_loss, -100.0, 100.0)
-                kl_loss = torch.clamp(kl_loss, -10.0, 10.0)
-
-                loss = (policy_loss + kl_loss) / grad_accum
-
-                # 检测异常loss，跳过这个batch
-                if torch.isnan(loss) or torch.isinf(loss) or abs(loss.item()) > 50.0:
-                    print(f"[WARNING] Abnormal loss detected: {loss.item():.2f}, skipping this batch")
-                    self.optimizer.zero_grad()  # 清空梯度
-                    continue
-
-                loss.backward()
-                backward_calls += 1
-                if (idx + 1) % grad_accum == 0:
-                    torch.nn.utils.clip_grad_norm_(
-                        self.policy_model.parameters(), max_grad_norm
-                    )
-                    self.optimizer.step()
-                    self.optimizer.zero_grad()
-                    step_count += 1
-                    global_step = self.trained_steps + step_count
-                    with open(self.log_path, "a", encoding="utf-8") as f:
-                        f.write(
-                            f"{global_step}\t{sample_index}\t{idx}\t{float(loss.item()):.6f}\t"
-                            f"{float(policy_loss.item()):.6f}\t{float(kl_loss.item()):.6f}\t"
-                            f"{float(train_rewards[idx].item() if idx < len(train_rewards) else train_rewards[-1].item()):.6f}\t{group_acc:.4f}\t{train_started_flag}\n"
-                        )
-                    train_started_flag = 0
-            # Flush remainder grads if any
-            if backward_calls % grad_accum != 0 and backward_calls > 0:
-                torch.nn.utils.clip_grad_norm_(
-                    self.policy_model.parameters(), max_grad_norm
-                )
-                self.optimizer.step()
+            # 检测异常
+            if torch.isnan(total_loss) or torch.isinf(total_loss):
+                print(f"[WARNING] Abnormal loss detected: {total_loss.item():.4f}, skipping")
                 self.optimizer.zero_grad()
-                step_count += 1
-                global_step = self.trained_steps + step_count
-                last_idx = min(backward_calls - 1, len(rewards) - 1)
-                with open(self.log_path, "a", encoding="utf-8") as f:
-                    f.write(
-                        f"{global_step}\t{sample_index}\t{last_idx}\t{float(loss.item()):.6f}\t"
-                        f"{float(policy_loss.item()):.6f}\t{float(kl_loss.item()):.6f}\t"
-                        f"{float(train_rewards[last_idx].item() if last_idx < len(train_rewards) else train_rewards[-1].item()):.6f}\t{group_acc:.4f}\t{train_started_flag}\n"
-                    )
-                train_started_flag = 0
+                continue
+
+            # ==================== 反向传播 ====================
+            self.optimizer.zero_grad()
+            total_loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.policy_model.parameters(), max_grad_norm)
+            self.optimizer.step()
+            step_count += 1
+
+            # ==================== 日志记录（对齐 verl 格式） ====================
+            global_step = self.trained_steps + step_count
+            # 计算额外统计量
+            mean_reward = raw_rewards.mean().item()
+            mean_adv = advantages.mean().item()
+
+            with open(self.log_path, "a", encoding="utf-8") as f:
+                f.write(
+                    f"{global_step}\t{sample_index}\tepoch_{epoch}\t"
+                    f"{float(total_loss.item()):.6f}\t"
+                    f"{float(pg_loss.item()):.6f}\t"
+                    f"{float(kl_loss.item()):.6f}\t"
+                    f"{float(ppo_kl.item()):.6f}\t"
+                    f"{float(pg_clipfrac.item()):.4f}\t"
+                    f"{mean_reward:.4f}\t"
+                    f"{mean_adv:.4f}\t"
+                    f"{group_acc:.4f}\n"
+                )
+
+            # 打印训练信息（对齐 verl 格式）
+            print(f"[GRPO] step={global_step} | sample={sample_index} | epoch={epoch} | "
+                  f"loss={total_loss.item():.4f} | pg_loss={pg_loss.item():.4f} | "
+                  f"kl_loss={kl_loss.item():.4f} | ppo_kl={ppo_kl.item():.4f} | "
+                  f"clipfrac={pg_clipfrac.item():.4f} | reward={mean_reward:.4f} | acc={group_acc:.4f}")
+
         self.trained_steps += step_count
+
+        # 保存模型
         if save_dir:
             os.makedirs(save_dir, exist_ok=True)
             self.policy_model.save_pretrained(save_dir)

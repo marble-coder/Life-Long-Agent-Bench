@@ -1,0 +1,78 @@
+import:
+  - ../task.yaml
+  - ../../../agent.yaml
+  - ../../../../../../definition.yaml
+
+# 只测试 Greedy + Reflection（无历史轨迹召回，无 GRPO 训练）
+# 用于验证 greedy pass 1 + reflection + greedy pass 2 的流程
+# 使用 previous_sample_embedding_callback 的本地模型生成 reflection
+
+assignment_config:
+  callback_dict:
+    callback_0:
+      name: current_session_saving_callback
+    callback_1:
+      name: consecutive_abnormal_agent_inference_process_handling_callback
+    # 使用 previous_sample_embedding_callback：
+    # - 不召回历史轨迹 (utilized_sample_count: 0)
+    # - 配置本地模型生成 retry reflection (reflection_use_local_model: true)
+    # - 负责注入 reflection 到 chat_history[2]
+    callback_2:
+      name: previous_sample_embedding_callback
+      custom_parameters:
+        utilized_sample_count: 0  # 不召回历史轨迹
+        max_cached_session_count: 0  # 不存储轨迹
+        embedding_model_name: /mnt/ssd2/models/Qwen3-Embedding-4B
+        embedding_device: cpu  # embedding 模型不需要，设为 cpu
+        min_similarity: -100
+        enable_memory_review: false
+        store_failed_trajectories: false
+        # ========== Reflection 配置（用于 retry） ==========
+        enable_reflection: false  # 不在存储时生成反思（因为不存储）
+        reflection_use_local_model: true  # 使用本地模型生成 retry reflection
+        reflection_local_model_path: /mnt/ssd2/models/Meta-Llama-3.1-8B-Instruct
+        reflection_local_model_device: "auto"
+        reflection_local_do_sample: false
+        reflection_max_new_tokens: 1024
+        reflection_system_prompt: |
+          You are an expert AI Agent Analyst specialized in analyzing Text-to-SQL agent trajectories.
+          Your goal is to distill generalizable, actionable insights from execution trajectories.
+        reflection_user_prompt_template: |
+          ### Input Context
+          **1. User Query:**
+          {query}
+
+          **2. Agent Trajectory:**
+          {trajectory}
+
+          **3. Evaluation Outcome:**
+          {outcome_status}
+          {error_message}
+
+          ---
+
+          ### Output Format
+          Output a valid JSON object:
+
+          ```json
+          {{
+            "diagnosis_reasoning": "Analysis of success/failure factors...",
+            "error_type": "Syntax Error | Logic Error | Schema Misunderstanding | Optimal Path | ...",
+            "insight": "A generalizable rule or tip (under 50 words).",
+            "tags": ["relevant_concept"]
+          }}
+          ```
+        # ========== Rerank 配置（禁用） ==========
+        enable_rerank: false
+  output_dir: outputs/greedy_with_reflection_only/{TIMESTAMP}
+  sample_order: default
+
+environment_config:
+  use_task_client_flag: false
+
+task_dict:
+  db_bench:
+    parameters:
+      chat_history_item_factory:
+        parameters:
+          chat_history_item_dict_path: ./chat_history_items/previous_sample_utilization/db_bench.json

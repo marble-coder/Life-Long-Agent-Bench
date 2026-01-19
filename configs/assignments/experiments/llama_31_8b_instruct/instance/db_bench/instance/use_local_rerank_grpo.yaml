@@ -32,6 +32,7 @@ assignment_config:
         rerank_api_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
         rerank_api_key_env: "DASHSCOPE_API_KEY"
         rerank_api_temperature: 0.0
+        rerank_include_trajectory: false  # rerank 只用 query + reflection，不含完整轨迹
         # Rerank system prompt
         rerank_system_prompt: |
           You are an expert AI assistant specialized in selecting and synthesizing relevant historical examples for Text-to-SQL tasks.
@@ -71,15 +72,17 @@ assignment_config:
 
           ```json
           {{{{
-            "selected_indices": [1, 3, 5, 7],
-            "reasoning": "Brief explanation of why these were selected...",
-            "guidance": "How to use these historical examples for the current task: ..."
+            "selected_indices": [<your selected indices here>],
+            "reasoning": "Your analysis of why these candidates are most relevant...",
+            "guidance": "Your actionable guidance on how to apply these examples..."
           }}}}
           ```
 
-          Notes:
-          - `selected_indices` should contain exactly {top_k} numbers (1-indexed)
-          - `guidance` should be a concise, actionable instruction (under 100 words) that tells the model how to leverage the selected examples
+          **IMPORTANT:**
+          - `selected_indices` must contain exactly {top_k} numbers (1-indexed, from 1 to {candidate_count})
+          - You MUST carefully analyze each candidate and select based on relevance to the current task
+          - Do NOT just pick arbitrary indices - actually read and compare the candidates
+          - `guidance` should be a concise, actionable instruction (under 100 words)
           - Focus on SQL patterns and common pitfalls in the guidance
         # 启用反思功能 - 详细 insight 提取
         enable_reflection: true

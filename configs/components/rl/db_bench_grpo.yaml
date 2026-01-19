@@ -11,11 +11,11 @@ generation:
   # You can add other HF generation kwargs if needed.
 
 grpo:
-  beta: 0.04 #之前0.04
-  clip_param: 0.2
-  normalize_rewards: true
-  use_best_of_n: false 
-  #reference_model_path: null  # optional: path to frozen reference model; null uses sampling logprobs as reference
+  beta: 0.04                      # KL penalty 系数
+  clip_param: 0.2                 # PPO clip range (epsilon)
+  clip_ratio_c: 3.0               # dual-clip 上界（负优势时的额外裁剪，对齐 verl）
+  kl_penalty_mode: "k3"           # KL 计算模式：k1, k2, k3(low_var_kl), abs
+  loss_agg_mode: "token-mean"     # loss 聚合方式：token-mean, seq-mean-token-sum, seq-mean-token-mean
   reference_model_path: "/mnt/ssd2/models/Meta-Llama-3.1-8B-Instruct"
 
 lora:

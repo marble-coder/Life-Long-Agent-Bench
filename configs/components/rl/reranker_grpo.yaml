@@ -1,0 +1,63 @@
+# Reranker GRPO Training Configuration
+# 训练 reranker 使用对比奖励
+
+# Reranker 模型路径
+reranker_model_path: /mnt/ssd2/models/Meta-Llama-3.1-8B-Instruct
+reranker_device: auto
+
+# 对比奖励配置
+reward:
+  # baseline 正确 + 带记忆正确 → 记忆没帮上忙
+  baseline_correct_memory_correct: 0.2
+  # baseline 正确 + 带记忆错误 → 记忆帮倒忙
+  baseline_correct_memory_wrong: -1.0
+  # baseline 错误 + 带记忆正确 → 记忆有价值！
+  baseline_wrong_memory_correct: 1.0
+  # baseline 错误 + 带记忆错误 → 记忆没救回来
+  baseline_wrong_memory_wrong: -0.2
+  # 格式奖励
+  format_correct: 0.2   # 输出格式正确
+  format_wrong: -0.2    # 输出格式错误
+
+# GRPO 配置
+group_size: 4  # 每个样本采样次数
+accumulate_samples: 2  # 累积多少个样本后训练
+warmup_samples: 50  # 前 N 个样本只评估不训练（等待召回库积累足够轨迹）
+
+grpo:
+  beta: 0.0  # KL 惩罚系数（0 表示不使用 KL 损失，也不加载 ref model）
+  clip_param: 0.2  # PPO clip 参数
+  clip_ratio_c: 3.0  # dual-clip 参数
+  kl_penalty_mode: k3  # KL 惩罚模式
+  loss_agg_mode: token-mean  # loss 聚合模式
+  # reference_model_path: null  # beta=0 时不需要
+
+# LoRA 配置
+lora:
+  enabled: true
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+
+# 优化器配置
+optim:
+  learning_rate: 2e-5
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  num_train_epochs: 1
+
+# 保存配置
+save:
+  lora_output_dir: outputs/{TIMESTAMP}/reranker_lora
+
+# 监控配置
+monitoring:
+  tensorboard: true

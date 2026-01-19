@@ -1,0 +1,4 @@
+reflection_grpo_training_callback:
+  module: "src.callbacks.instance.reflection_grpo_training_callback.ReflectionGRPOTrainingCallback"
+  parameters:
+    config_path: "./configs/components/rl/reflection_grpo.yaml"  # placeholder, overwritten at runtime

@@ -43,6 +43,14 @@ try:
     from src.callbacks.instance import MemoryReviewGRPOCallback
 except Exception:
     MemoryReviewGRPOCallback = None  # type: ignore
+try:
+    from src.callbacks.instance import RerankerGRPOTrainingCallback
+except Exception:
+    RerankerGRPOTrainingCallback = None  # type: ignore
+try:
+    from src.callbacks.instance import ReflectionGRPOTrainingCallback
+except Exception:
+    ReflectionGRPOTrainingCallback = None  # type: ignore
 
 
 class ConfigUtilityCaller(StrEnum):
@@ -152,7 +160,11 @@ class ConfigUtility:
         )
         custom_parameters = custom_instance_info_dict.get("custom_parameters") or {}
         for parameter_name, custom_parameter_value in custom_parameters.items():
-            assert parameter_name in default_parameters  # Do not remove this assertion.
+            if parameter_name not in default_parameters:
+                raise AssertionError(
+                    f"Parameter '{parameter_name}' not found in default parameters for module '{module}'. "
+                    f"Available parameters: {list(default_parameters.keys())}"
+                )
             # Overwrite the default parameter value with the custom parameter value.
             default_parameters[parameter_name] = custom_parameter_value
         return {
@@ -388,10 +400,21 @@ def main() -> None:
         (MemoryReviewGRPOCallback is not None and isinstance(cb, MemoryReviewGRPOCallback))
         for cb in callback_dict.values()
     )
+    # 检测是否启用 Reranker GRPO 训练
+    enable_reranker_grpo = any(
+        RerankerGRPOTrainingCallback is not None and isinstance(cb, RerankerGRPOTrainingCallback)
+        for cb in callback_dict.values()
+    )
+    # 检测是否启用 Reflection GRPO 训练
+    enable_reflection_grpo = any(
+        ReflectionGRPOTrainingCallback is not None and isinstance(cb, ReflectionGRPOTrainingCallback)
+        for cb in callback_dict.values()
+    )
     # DEBUG: 打印 callback 类型和 enable_grpo 状态
     logger.info(f"[DEBUG] Callbacks loaded: {[(k, type(v).__name__) for k, v in callback_dict.items()]}")
     logger.info(f"[DEBUG] MemoryReviewGRPOCallback class: {MemoryReviewGRPOCallback}")
-    logger.info(f"[DEBUG] enable_grpo = {enable_grpo}")
+    logger.info(f"[DEBUG] enable_grpo = {enable_grpo}, enable_reranker_grpo = {enable_reranker_grpo}, "
+                f"enable_reflection_grpo = {enable_reflection_grpo}")
     # Apply sample limit if provided
     if args.max_samples is not None and args.max_samples > 0:
         unfinished_sample_order = unfinished_sample_order[: args.max_samples]
@@ -407,22 +430,45 @@ def main() -> None:
         group_size = 1
         strategy = "best_reward"
         for cb in callback_dict.values():
+            # 只从普通 GRPO callbacks 获取 group_size，不包括 RerankerGRPOTrainingCallback
+            if RerankerGRPOTrainingCallback is not None and isinstance(cb, RerankerGRPOTrainingCallback):
+                continue
             if hasattr(cb, "group_size"):
                 group_size = max(group_size, getattr(cb, "group_size"))
             if hasattr(cb, "best_metric_strategy"):
                 strategy = getattr(cb, "best_metric_strategy")
         return group_size, strategy
 
+    def _get_reranker_group_size(callback_dict: Mapping[str, Callback]) -> int:
+        """获取 reranker GRPO 的 group_size"""
+        for cb in callback_dict.values():
+            if RerankerGRPOTrainingCallback is not None and isinstance(cb, RerankerGRPOTrainingCallback):
+                return getattr(cb, "group_size", 4)
+        return 4
+
+    def _get_reflection_k1_k2(callback_dict: Mapping[str, Callback]) -> tuple[int, int]:
+        """获取 reflection GRPO 的 k1 (reflections per sample) 和 k2 (rollouts per reflection)"""
+        for cb in callback_dict.values():
+            if ReflectionGRPOTrainingCallback is not None and isinstance(cb, ReflectionGRPOTrainingCallback):
+                k1 = getattr(cb, "k1", 4)
+                k2 = getattr(cb, "k2", 4)
+                return k1, k2
+        return 4, 4
+
     # 奖励函数已移至grpo_training_callback.py中的_calc_reward方法
 
     group_size, best_metric_strategy = _get_group_config(callback_dict)
+    reranker_group_size = _get_reranker_group_size(callback_dict) if enable_reranker_grpo else 1
+    reflection_k1, reflection_k2 = _get_reflection_k1_k2(callback_dict) if enable_reflection_grpo else (1, 1)
     if not enable_grpo:
         group_size = 1
     # endregion
     group_correct_record: list[bool] = []
     for sample_index in unfinished_sample_order:
         logger.info(
-            f"Sample {sample_index} start with group_size={group_size} (best_metric_strategy={best_metric_strategy})."
+            f"Sample {sample_index} start with group_size={group_size}, "
+            f"reranker_group_size={reranker_group_size}, reflection_k1={reflection_k1}, reflection_k2={reflection_k2} "
+            f"(best_metric_strategy={best_metric_strategy})."
         )
         # ----- Greedy evaluation pass (for metric) -----
         original_inference_cfg = getattr(agent, "_inference_config_dict", None)
@@ -448,6 +494,42 @@ def main() -> None:
         for cb in grpo_callbacks:
             cb.skip_override = True  # type: ignore[attr-defined]
 
+        # ----- BASELINE evaluation pass (for Reranker GRPO: no memory injection) -----
+        if enable_reranker_grpo:
+            baseline_session = Session(task_name=task.task_name, sample_index=sample_index)
+            # 注意：finish_reason 必须在 task.complete() 之前设置，不能在创建时设置
+            # 否则 task.interact() 会因为 assert finish_reason is None 而失败
+            baseline_callback_args = CallbackArguments(
+                current_session=baseline_session,
+                task=task,
+                agent=agent,
+                session_list=session_list,
+            )
+            # 在 on_session_create 之前标记为 baseline（供 callback 识别）
+            setattr(baseline_session, '_is_baseline_eval', True)
+            callback_handler.on_session_create(baseline_callback_args)
+            if baseline_callback_args.session_controller.should_task_reset:
+                task.reset(baseline_session)
+                callback_handler.on_task_reset(baseline_callback_args)
+            logger.info(f"Sample {sample_index} BASELINE eval start (no memory).")
+            while baseline_session.sample_status == SampleStatus.RUNNING:
+                if baseline_callback_args.session_controller.should_agent_inference:
+                    agent.inference(baseline_session)
+                    callback_handler.on_agent_inference(baseline_callback_args)
+                if baseline_callback_args.session_controller.should_task_interact:
+                    task.interact(baseline_session)
+                    callback_handler.on_task_interact(baseline_callback_args)
+            if baseline_callback_args.session_controller.should_task_complete:
+                baseline_session.finish_reason = "BASELINE_EVAL"  # 在 complete 之前设置
+                task.complete(baseline_session)
+                callback_handler.on_task_complete(baseline_callback_args)
+            logger.info(
+                f"Sample {sample_index} BASELINE eval end. "
+                f"Session status: {baseline_session.sample_status}. "
+                f"Evaluation outcome: {baseline_session.evaluation_record.outcome}."
+            )
+
+        # ----- Greedy evaluation pass 1 (for metric, WITH memory) -----
         greedy_session = Session(task_name=task.task_name, sample_index=sample_index)
         greedy_callback_args = CallbackArguments(
             current_session=greedy_session,
@@ -459,7 +541,7 @@ def main() -> None:
         if greedy_callback_args.session_controller.should_task_reset:
             task.reset(greedy_session)
             callback_handler.on_task_reset(greedy_callback_args)
-        logger.info(f"Sample {sample_index} greedy eval start.")
+        logger.info(f"Sample {sample_index} greedy eval pass 1 start (with memory).")
         while greedy_session.sample_status == SampleStatus.RUNNING:
             if greedy_callback_args.session_controller.should_agent_inference:
                 agent.inference(greedy_session)
@@ -471,16 +553,146 @@ def main() -> None:
             greedy_session.finish_reason = "GREEDY_EVAL"
             task.complete(greedy_session)
             callback_handler.on_task_complete(greedy_callback_args)
-        logger.info(
-            f"Sample {sample_index} greedy eval end. "
-            f"Session status: {greedy_session.sample_status}. "
-            f"Evaluation outcome: {greedy_session.evaluation_record.outcome}."
-        )
-        # Record metric based on greedy only
-        session_list.append(greedy_session)
-        sample_any_correct = (
+
+        # 判断是否正确：只要 evaluation outcome 是 CORRECT 就算正确
+        # （即使 sample_status 是 task_limit_reached，只要答案对了就算成功）
+        greedy_pass1_correct = (
             greedy_session.evaluation_record.outcome == SessionEvaluationOutcome.CORRECT
         )
+        logger.info(
+            f"Sample {sample_index} greedy eval pass 1 end. "
+            f"Session status: {greedy_session.sample_status}. "
+            f"Evaluation outcome: {greedy_session.evaluation_record.outcome}. "
+            f"Correct: {greedy_pass1_correct}"
+        )
+
+        # ----- Greedy evaluation pass 2 (with reflection, if pass 1 failed) -----
+        # 支持两种方式生成 reflection：
+        # 1. 使用 reflection_grpo_training_callback（如果存在）
+        # 2. 使用 previous_sample_embedding_callback 的 generate_retry_reflection（如果配置了 reflection）
+        greedy_pass2_correct = False
+        greedy_session_2: Optional[Session] = None  # 用于保存 pass 2 的 session
+
+        # 检查是否有可用的 reflection 生成器
+        reflection_grpo_cb = None
+        embedding_cb_for_reflection = None
+        for cb in callback_dict.values():
+            if ReflectionGRPOTrainingCallback is not None and isinstance(cb, ReflectionGRPOTrainingCallback):
+                reflection_grpo_cb = cb
+            # 检查 previous_sample_embedding_callback 是否配置了 reflection
+            from src.callbacks.instance.previous_sample_embedding_callback import PreviousSampleEmbeddingCallback
+            if isinstance(cb, PreviousSampleEmbeddingCallback):
+                # 检查是否配置了本地模型或 API
+                if cb.reflection_use_local_model or os.getenv(cb.reflection_api_key_env, ""):
+                    embedding_cb_for_reflection = cb
+
+        # 决定是否启用 retry with reflection
+        enable_retry_reflection = (
+            not greedy_pass1_correct and
+            (enable_reflection_grpo or embedding_cb_for_reflection is not None)
+        )
+
+        if enable_retry_reflection:
+            # 提取当前 query 和 greedy 轨迹（用于生成 reflection）
+            current_query_for_retry = ""
+            greedy_trajectory_for_retry = ""
+            try:
+                candidate = greedy_session.chat_history.get_item_deep_copy(2)
+                from src.typings import Role
+                if candidate.role == Role.USER:
+                    current_query_for_retry = candidate.content.strip()
+
+                agent_role_dict = agent.get_role_dict()
+                greedy_trajectory_for_retry = greedy_session.chat_history.get_value_str(
+                    agent_role_dict, start_index=3, end_index=None
+                )
+            except Exception as e:
+                logger.warning(f"Failed to extract query/trajectory for retry reflection: {e}")
+
+            retry_insight_text = None
+            if current_query_for_retry and greedy_trajectory_for_retry:
+                # 优先使用 reflection_grpo_cb（如果存在）
+                if reflection_grpo_cb is not None:
+                    retry_reflection_text, retry_insight_text, _ = reflection_grpo_cb.generate_reflection(
+                        current_query=current_query_for_retry,
+                        greedy_trajectory=greedy_trajectory_for_retry,
+                        greedy_correct=False,
+                        sample_index=sample_index,
+                        reflection_id=-1  # 特殊 ID 表示 retry，不用于 GRPO 训练
+                    )
+                    logger.info(f"[RetryReflection] Using reflection_grpo_cb to generate reflection")
+                # 否则使用 embedding_cb_for_reflection
+                elif embedding_cb_for_reflection is not None:
+                    retry_insight_text = embedding_cb_for_reflection.generate_retry_reflection(
+                        query=current_query_for_retry,
+                        trajectory=greedy_trajectory_for_retry,
+                        outcome="failure",
+                        error_message="Wrong answer",
+                    )
+                    logger.info(f"[RetryReflection] Using previous_sample_embedding_callback to generate reflection")
+
+                if retry_insight_text:
+                    logger.info(
+                        f"Sample {sample_index} generated retry reflection: {retry_insight_text[:100]}..."
+                    )
+
+                    # ----- Greedy evaluation pass 2 -----
+                    greedy_session_2 = Session(task_name=task.task_name, sample_index=sample_index)
+                    # 设置 reflection 到 session，用于注入到第二个 user prompt（task query）
+                    setattr(greedy_session_2, '_retry_reflection_text', retry_insight_text)
+                    setattr(greedy_session_2, '_is_retry_with_reflection', True)
+
+                    greedy_callback_args_2 = CallbackArguments(
+                        current_session=greedy_session_2,
+                        task=task,
+                        agent=agent,
+                        session_list=session_list,
+                    )
+                    callback_handler.on_session_create(greedy_callback_args_2)
+                    if greedy_callback_args_2.session_controller.should_task_reset:
+                        task.reset(greedy_session_2)
+                        callback_handler.on_task_reset(greedy_callback_args_2)
+
+                    logger.info(f"Sample {sample_index} greedy eval pass 2 start (with reflection).")
+                    while greedy_session_2.sample_status == SampleStatus.RUNNING:
+                        if greedy_callback_args_2.session_controller.should_agent_inference:
+                            agent.inference(greedy_session_2)
+                            callback_handler.on_agent_inference(greedy_callback_args_2)
+                        if greedy_callback_args_2.session_controller.should_task_interact:
+                            task.interact(greedy_session_2)
+                            callback_handler.on_task_interact(greedy_callback_args_2)
+                    if greedy_callback_args_2.session_controller.should_task_complete:
+                        greedy_session_2.finish_reason = "GREEDY_EVAL_RETRY"
+                        task.complete(greedy_session_2)
+                        callback_handler.on_task_complete(greedy_callback_args_2)
+
+                    # 判断是否正确：只要 evaluation outcome 是 CORRECT 就算正确
+                    # （即使 sample_status 是 task_limit_reached，只要答案对了就算成功）
+                    greedy_pass2_correct = (
+                        greedy_session_2.evaluation_record.outcome == SessionEvaluationOutcome.CORRECT
+                    )
+                    logger.info(
+                        f"Sample {sample_index} greedy eval pass 2 end. "
+                        f"Session status: {greedy_session_2.sample_status}. "
+                        f"Evaluation outcome: {greedy_session_2.evaluation_record.outcome}. "
+                        f"Correct: {greedy_pass2_correct}"
+                    )
+                    # greedy_session_2 已在上面被赋值，无需再更新
+
+        # Record metric: pass 1 或 pass 2 任一成功都算正确
+        sample_any_correct = greedy_pass1_correct or greedy_pass2_correct
+        logger.info(
+            f"Sample {sample_index} final metric: pass1={greedy_pass1_correct}, pass2={greedy_pass2_correct}, "
+            f"any_correct={sample_any_correct}"
+        )
+
+        # Note: Reflection for greedy trajectory will be automatically generated by
+        # previous_sample_embedding_callback.on_state_save() if enable_reflection=True
+        # 保存 pass 1 的 session
+        session_list.append(greedy_session)
+        # 如果执行了 pass 2，也保存 pass 2 的 session
+        if greedy_session_2 is not None:
+            session_list.append(greedy_session_2)
         group_correct_record.append(sample_any_correct)
         # Persist current session list
         json.dump(
@@ -495,9 +707,158 @@ def main() -> None:
         for cb in grpo_callbacks:
             cb.skip_override = False  # type: ignore[attr-defined]
 
+        # ----- Reflection GRPO: nested k1 reflections × k2 base rollouts -----
+        # 这里训练 reflection model（外层）和 base model（内层，复用 grpo_callbacks）
+        if enable_reflection_grpo:
+            # 注册 greedy 结果到 reflection callback
+            # 使用 pass1 的结果（因为 reflection 是基于 pass1 的轨迹生成的）
+            greedy_correct = greedy_pass1_correct
+            reflection_grpo_cb = None
+            for cb in callback_dict.values():
+                if ReflectionGRPOTrainingCallback is not None and isinstance(cb, ReflectionGRPOTrainingCallback):
+                    cb.register_greedy_result(sample_index, greedy_correct)
+                    reflection_grpo_cb = cb
+                    break
+
+            # 提取当前 query 和 greedy 轨迹（用于生成 reflection）
+            current_query = ""
+            greedy_trajectory = ""
+            try:
+                candidate = greedy_session.chat_history.get_item_deep_copy(2)
+                from src.typings import Role
+                if candidate.role == Role.USER:
+                    current_query = candidate.content.strip()
+
+                # 提取 greedy 轨迹（从 index 3 开始，包含 agent 的完整推理过程）
+                agent_role_dict = agent.get_role_dict()
+                greedy_trajectory = greedy_session.chat_history.get_value_str(
+                    agent_role_dict, start_index=3, end_index=None
+                )
+            except Exception as e:
+                logger.warning(f"Failed to extract query/trajectory for reflection: {e}")
+
+            # 外层循环：k1 个 reflections
+            for reflection_id in range(reflection_k1):
+                # 生成 reflection（基于 greedy 轨迹）
+                reflection_text = ""  # 完整的 JSON（用于存储和训练）
+                insight_text = ""     # 提取的 insight（用于注入到 prompt）
+                reflection_messages = []
+                if reflection_grpo_cb is not None and current_query and greedy_trajectory:
+                    reflection_text, insight_text, reflection_messages = reflection_grpo_cb.generate_reflection(
+                        current_query=current_query,
+                        greedy_trajectory=greedy_trajectory,
+                        greedy_correct=greedy_correct,
+                        sample_index=sample_index,
+                        reflection_id=reflection_id
+                    )
+                    # 注册 reflection 生成（用于训练）
+                    if reflection_text and reflection_messages:
+                        reflection_grpo_cb.register_reflection_generation(
+                            sample_index, reflection_id, reflection_messages, reflection_text
+                        )
+                    logger.info(
+                        f"Sample {sample_index} reflection {reflection_id + 1}/{reflection_k1} generated"
+                    )
+                    logger.info(f"  Insight: {insight_text[:100]}...")
+
+                # 内层循环：每个 reflection 对应 k2 个 base model rollouts
+                for rollout_id in range(reflection_k2):
+                    # 为了让 grpo_training_callback_rllm 能够正确分组，
+                    # 我们需要让每个 reflection 的 rollouts 看起来像不同的 sample
+                    # 使用 (sample_index, reflection_id) 作为虚拟 sample_index
+                    virtual_sample_index = f"{sample_index}_r{reflection_id}"
+                    session = Session(task_name=task.task_name, sample_index=virtual_sample_index)
+                    # 同时保存原始 sample_index，供其他 callback 使用
+                    setattr(session, '_original_sample_index', sample_index)
+                    # 保存 insight_text 到 session，供 callback 注入到 prompt
+                    # 同时保存完整的 reflection_text 和 messages（用于训练）
+                    setattr(session, '_reflection_text', insight_text)  # 注入用
+                    setattr(session, '_reflection_full', reflection_text)  # 完整 JSON（可选）
+                    setattr(session, '_reflection_messages', reflection_messages)
+                    callback_args = CallbackArguments(
+                        current_session=session,
+                        task=task,
+                        agent=agent,
+                        session_list=session_list,
+                    )
+                    # 设置 reflection_id 到 session，供 callback 使用
+                    setattr(session, '_reflection_id', reflection_id)
+                    setattr(session, '_rollout_id', rollout_id)
+
+                    callback_handler.on_session_create(callback_args)
+                    if callback_args.session_controller.should_task_reset:
+                        # 临时恢复原始 sample_index 用于 task.reset (dataset lookup)
+                        # 保存 virtual index
+                        virtual_index = session.sample_index
+                        # 使用原始 index 进行 reset
+                        session.sample_index = sample_index
+                        task.reset(session)
+                        # 立即恢复 virtual index (在 on_task_reset 之前)
+                        session.sample_index = virtual_index
+                        # 同时更新 task.current_sample_index 为 virtual index (避免 interact/complete 时的 assert 失败)
+                        task.current_sample_index = virtual_index
+                        callback_handler.on_task_reset(callback_args)
+                    logger.info(
+                        f"Sample {sample_index} reflection {reflection_id + 1}/{reflection_k1} "
+                        f"rollout {rollout_id + 1}/{reflection_k2} start."
+                    )
+                    while session.sample_status == SampleStatus.RUNNING:
+                        if callback_args.session_controller.should_agent_inference:
+                            agent.inference(session)
+                            callback_handler.on_agent_inference(callback_args)
+                        if callback_args.session_controller.should_task_interact:
+                            task.interact(session)
+                            callback_handler.on_task_interact(callback_args)
+                    if callback_args.session_controller.should_task_complete:
+                        task.complete(session)
+                        callback_handler.on_task_complete(callback_args)
+
+                    # 注册 rollout 结果到 reflection callback
+                    # 只看 evaluation outcome，不需要检查 sample_status
+                    # 因为 task_limit_reached 等状态下也可能是正确的结果
+                    rollout_correct = session.evaluation_record.outcome == SessionEvaluationOutcome.CORRECT
+                    for cb in callback_dict.values():
+                        if ReflectionGRPOTrainingCallback is not None and isinstance(cb, ReflectionGRPOTrainingCallback):
+                            cb.register_rollout_result(sample_index, reflection_id, rollout_correct, session)
+                            break
+
+                    logger.info(
+                        f"Sample {sample_index} reflection {reflection_id + 1}/{reflection_k1} "
+                        f"rollout {rollout_id + 1}/{reflection_k2} end. "
+                        f"Session status: {session.sample_status}. "
+                        f"Evaluation outcome: {session.evaluation_record.outcome}."
+                    )
+
+            # 检查是否需要存储成功轨迹到 memory（如果 greedy 失败但有 rollout 成功）
+            for cb in callback_dict.values():
+                if ReflectionGRPOTrainingCallback is not None and isinstance(cb, ReflectionGRPOTrainingCallback):
+                    # 检查是否启用了成功轨迹存储
+                    if cb.store_rollout_success_to_memory:
+                        success_candidate = cb.get_success_candidate_for_memory(sample_index)
+                        if success_candidate is not None:
+                            # 存储到 memory（通过 previous_sample_embedding_callback）
+                            try:
+                                from src.callbacks.instance.previous_sample_embedding_callback import PreviousSampleEmbeddingCallback
+                                for mem_cb in callback_dict.values():
+                                    if isinstance(mem_cb, PreviousSampleEmbeddingCallback):
+                                        # 将成功轨迹加入待存储队列（会在 on_state_save 时真正存储）
+                                        mem_cb._pending_session_to_store = (success_candidate, "success", "")
+                                        logger.info(
+                                            f"[ReflectionGRPO] Queued success trajectory from rollout for sample {sample_index} "
+                                            f"(greedy failed, rollout succeeded)"
+                                        )
+                                        break
+                            except ImportError:
+                                pass
+                            # 清理候选
+                            cb.clear_success_candidate(sample_index)
+                    break
+
         # ----- GRPO sampling/training passes (not used for metric) -----
+        # 注意：如果启用了 Reflection GRPO，则跳过独立的 GRPO rollouts
+        # 因为 Reflection GRPO 的 k2 rollouts 已经会触发 grpo_training_callback_rllm 的训练
         last_training_session: Optional[Session] = None
-        if enable_grpo:
+        if enable_grpo and not enable_reflection_grpo:
             for attempt_id in range(group_size):
                 session = Session(task_name=task.task_name, sample_index=sample_index)
                 callback_args = CallbackArguments(
@@ -527,6 +888,56 @@ def main() -> None:
                     f"Evaluation outcome: {session.evaluation_record.outcome}."
                 )
                 last_training_session = session
+
+        # ----- Reranker GRPO sampling/training passes -----
+        # 每次采样时 reranker 可能选择不同的记忆组合，用于训练 reranker 模型
+        # 获取 warmup 状态，warmup 期间跳过 rollout
+        reranker_in_warmup = False
+        if enable_reranker_grpo:
+            for cb in callback_dict.values():
+                if RerankerGRPOTrainingCallback is not None and isinstance(cb, RerankerGRPOTrainingCallback):
+                    reranker_in_warmup = cb._processed_samples < cb.warmup_samples
+                    break
+
+        if enable_reranker_grpo and not reranker_in_warmup:
+            for attempt_id in range(reranker_group_size):
+                session = Session(task_name=task.task_name, sample_index=sample_index)
+                callback_args = CallbackArguments(
+                    current_session=session,
+                    task=task,
+                    agent=agent,
+                    session_list=session_list,
+                )
+                callback_handler.on_session_create(callback_args)
+                if callback_args.session_controller.should_task_reset:
+                    task.reset(session)
+                    callback_handler.on_task_reset(callback_args)
+                logger.info(f"Sample {sample_index} reranker training attempt {attempt_id + 1}/{reranker_group_size} start.")
+                while session.sample_status == SampleStatus.RUNNING:
+                    if callback_args.session_controller.should_agent_inference:
+                        agent.inference(session)
+                        callback_handler.on_agent_inference(callback_args)
+                    if callback_args.session_controller.should_task_interact:
+                        task.interact(session)
+                        callback_handler.on_task_interact(callback_args)
+                if callback_args.session_controller.should_task_complete:
+                    task.complete(session)
+                    callback_handler.on_task_complete(callback_args)
+                logger.info(
+                    f"Sample {sample_index} reranker training attempt {attempt_id + 1}/{reranker_group_size} end. "
+                    f"Session status: {session.sample_status}. "
+                    f"Evaluation outcome: {session.evaluation_record.outcome}."
+                )
+                last_training_session = session
+        elif enable_reranker_grpo and reranker_in_warmup:
+            # Warmup 期间：只更新计数器，不做 rollout
+            for cb in callback_dict.values():
+                if RerankerGRPOTrainingCallback is not None and isinstance(cb, RerankerGRPOTrainingCallback):
+                    if sample_index not in cb._seen_sample_indices:
+                        cb._seen_sample_indices.add(sample_index)
+                        cb._processed_samples += 1
+                    logger.info(f"[RerankerGRPO] Warmup: {cb._processed_samples}/{cb.warmup_samples} samples, skipping rollout")
+                    break
         # Save callback state based on last training attempt (or greedy if no training run)
         state_session = last_training_session if last_training_session is not None else greedy_session
         callback_args = CallbackArguments(

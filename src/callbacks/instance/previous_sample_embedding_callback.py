@@ -2,13 +2,18 @@ import json
 import os
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence, TYPE_CHECKING
 
 import numpy as np
+import niuload  # 均匀分配显存
 from openai import OpenAI
 from sentence_transformers import SentenceTransformer
 
 from src.callbacks.callback import Callback, CallbackArguments
+
+# Lazy import for reranker GRPO training callback
+if TYPE_CHECKING:
+    from src.callbacks.instance.reranker_grpo_training_callback import RerankerGRPOTrainingCallback
 from src.typings import (
     ChatHistoryItem,
     Role,
@@ -70,6 +75,7 @@ class PreviousSampleEmbeddingCallback(Callback):
         store_failed_trajectories: bool = False,  # 是否存储失败轨迹
         # 反思功能相关参数
         enable_reflection: bool = False,  # 是否启用轨迹反思/总结
+        trajectory_mode: str = "always",  # 轨迹包含策略: "always", "never", "reflection_only", "adaptive"
         reflection_use_local_model: bool = False,  # 是否使用本地模型（而非 API）
         reflection_local_model_path: Optional[str] = None,  # 本地模型路径
         reflection_local_model_device: str = "cuda",  # 本地模型设备
@@ -91,6 +97,7 @@ class PreviousSampleEmbeddingCallback(Callback):
         rerank_local_model_path: Optional[str] = None,  # 本地模型路径（可与 reflection 共用）
         rerank_local_model_device: str = "cuda",  # 本地模型设备
         rerank_local_do_sample: bool = False,  # 本地模型是否采样
+        rerank_local_temperature: float = 0.7,  # 本地模型采样温度
         rerank_api_model: str = "qwen-plus",  # rerank 使用的模型
         rerank_api_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1",
         rerank_api_key_env: str = "DASHSCOPE_API_KEY",
@@ -101,16 +108,20 @@ class PreviousSampleEmbeddingCallback(Callback):
         rerank_enable_thinking: bool = False,  # rerank 时是否启用思考模式
         rerank_thinking_budget_tokens: Optional[int] = None,  # 思考 token 预算
         rerank_include_guidance: bool = True,  # 是否将 rerank guidance 添加到 prompt
+        rerank_include_trajectory: bool = False,  # rerank 时是否包含完整轨迹（False 则只用 query + reflection）
         rerank_max_new_tokens: int = 512,  # 本地模型最大生成 token 数
     ):
         super().__init__()
         self.original_first_user_prompt = original_first_user_prompt
         self.pattern = "{previous_sample_utilization_target_position}"
         assert self.original_first_user_prompt.count(self.pattern) == 1
-        assert utilized_sample_count > 0
+        assert utilized_sample_count >= 0  # 允许为 0（不召回历史轨迹，但仍可注入 reflection）
         self.utilized_sample_count = utilized_sample_count
         if max_cached_session_count is None:
-            max_cached_session_count = max(utilized_sample_count * 4, utilized_sample_count)
+            if utilized_sample_count > 0:
+                max_cached_session_count = max(utilized_sample_count * 4, utilized_sample_count)
+            else:
+                max_cached_session_count = 0  # 不存储轨迹
         assert max_cached_session_count >= utilized_sample_count
         self.max_cached_session_count = max_cached_session_count
         self.embedding_model_name = embedding_model_name
@@ -121,6 +132,7 @@ class PreviousSampleEmbeddingCallback(Callback):
 
         # 反思功能
         self.enable_reflection = enable_reflection
+        self.trajectory_mode = trajectory_mode  # "always", "never", "reflection_only", "adaptive"
         self.reflection_use_local_model = reflection_use_local_model
         self.reflection_local_model_path = reflection_local_model_path
         self.reflection_local_model_device = reflection_local_model_device
@@ -145,6 +157,7 @@ class PreviousSampleEmbeddingCallback(Callback):
         self.rerank_local_model_path = rerank_local_model_path
         self.rerank_local_model_device = rerank_local_model_device
         self.rerank_local_do_sample = rerank_local_do_sample
+        self.rerank_local_temperature = rerank_local_temperature
         self.rerank_api_model = rerank_api_model
         self.rerank_api_base_url = rerank_api_base_url
         self.rerank_api_key_env = rerank_api_key_env
@@ -153,6 +166,7 @@ class PreviousSampleEmbeddingCallback(Callback):
         self.rerank_enable_thinking = rerank_enable_thinking
         self.rerank_thinking_budget_tokens = rerank_thinking_budget_tokens
         self.rerank_include_guidance = rerank_include_guidance
+        self.rerank_include_trajectory = rerank_include_trajectory
         self.rerank_max_new_tokens = rerank_max_new_tokens
         self.rerank_system_prompt = rerank_system_prompt or self._default_rerank_system_prompt()
         self.rerank_user_prompt_template = rerank_user_prompt_template or self._default_rerank_user_prompt_template()
@@ -165,6 +179,12 @@ class PreviousSampleEmbeddingCallback(Callback):
         self._pending_session_to_store: Optional[tuple[Session, str, str]] = None
         # 存储最近一次 rerank 的 guidance
         self._last_rerank_guidance: str = ""
+        # 存储最近一次 rerank 的 messages 和 response（用于 GRPO 训练）
+        self._last_rerank_messages: list[dict[str, str]] = []
+        self._last_rerank_response: str = ""
+        self._last_rerank_format_correct: bool = False  # 格式是否正确
+        # 当前 sample_index（用于 GRPO 注册）
+        self._current_sample_index: Optional[str | int] = None
         # 本地模型（reflection 和 rerank 可共用）
         self._local_model: Optional[Any] = None
         self._local_tokenizer: Optional[Any] = None
@@ -240,10 +260,23 @@ class PreviousSampleEmbeddingCallback(Callback):
 
     def on_task_complete(self, callback_args: CallbackArguments) -> None:
         current_session = callback_args.current_session
+        finish_reason = getattr(current_session, 'finish_reason', None)
+
+        # 处理 BASELINE_EVAL：记录 baseline 结果到 Reranker GRPO
+        if finish_reason == "BASELINE_EVAL":
+            is_correct = (
+                current_session.evaluation_record.outcome == SessionEvaluationOutcome.CORRECT
+                and current_session.sample_status == SampleStatus.COMPLETED
+            )
+            self._register_baseline_to_grpo(current_session.sample_index, is_correct)
+            SafeLogger.info(
+                f"[PreviousSampleEmbedding] BASELINE_EVAL result for {current_session.sample_index}: "
+                f"{'correct' if is_correct else 'wrong'}"
+            )
+            return
 
         # 只记录 greedy 评估的轨迹，但延迟到 on_state_save 时才存储
         # 这样可以避免在 GRPO 采样时召回到当前 query 自己的轨迹
-        finish_reason = getattr(current_session, 'finish_reason', None)
         if finish_reason != "GREEDY_EVAL":
             # 不是 greedy 评估，跳过
             return
@@ -289,19 +322,39 @@ class PreviousSampleEmbeddingCallback(Callback):
 
     def on_task_reset(self, callback_args: CallbackArguments) -> None:
         session = callback_args.current_session
-        current_query = self._extract_query_text(session) or ""
-        # DEBUG: Print the full query text being used for retrieval
-        query_display = current_query.replace("\n", "\\n")
-        SafeLogger.info(
-            f"[PreviousSampleEmbedding] RETRIEVING with query for sample {session.sample_index}:\n{query_display}"
-        )
-        agent_role_dict = callback_args.session_context.agent.get_role_dict()
-        selected_records = (
-            self._select_topk_records(current_query, agent_role_dict)
-            if current_query
-            else []
-        )
-        example_text = self._render_example_text(selected_records, agent_role_dict)
+        # 保存当前 sample_index（用于 GRPO 注册）
+        self._current_sample_index = session.sample_index
+
+        # 检查是否是 baseline 评估（不注入记忆）
+        # 注意：_is_baseline_eval 属性在 run_experiment.py 中设置，因为 finish_reason 在 task.complete 之前不能设置
+        is_baseline_eval = getattr(session, '_is_baseline_eval', False) or getattr(session, 'finish_reason', None) == "BASELINE_EVAL"
+
+        if is_baseline_eval:
+            # Baseline 评估：不注入任何记忆
+            SafeLogger.info(
+                f"[PreviousSampleEmbedding] BASELINE_EVAL for sample {session.sample_index}: no memory injection"
+            )
+            # 使用空的 example_text
+            example_text = "\n"
+        else:
+            # 正常模式：注入记忆
+            current_query = self._extract_query_text(session) or ""
+            # DEBUG: Print the full query text being used for retrieval
+            query_display = current_query.replace("\n", "\\n")
+            SafeLogger.info(
+                f"[PreviousSampleEmbedding] RETRIEVING with query for sample {session.sample_index}:\n{query_display}"
+            )
+            agent_role_dict = callback_args.session_context.agent.get_role_dict()
+            selected_records = (
+                self._select_topk_records(current_query, agent_role_dict)
+                if current_query
+                else []
+            )
+            example_text = self._render_example_text(selected_records, agent_role_dict)
+
+        # 注意：_reflection_text 现在注入到 chat_history[2]（task query）而不是 chat_history[0]
+        # 这里不再处理 _reflection_text，改为在下面处理 chat_history[2]
+
         first_user_prompt = self.original_first_user_prompt.replace(
             self.pattern, example_text
         )
@@ -314,6 +367,55 @@ class PreviousSampleEmbeddingCallback(Callback):
                 content=first_user_prompt,
             ),
         )
+
+        # ----- 处理 Reflection 注入到 chat_history[2]（task query）-----
+        # 检查是否有 reflection 需要注入（用于 Reflection GRPO 训练的 rollouts）
+        reflection_text = getattr(session, '_reflection_text', '')
+        # 检查是否有 retry reflection 需要注入（用于 greedy pass 2 的重试）
+        retry_reflection_text = getattr(session, '_retry_reflection_text', '')
+
+        # 选择要注入的 reflection（优先使用 retry_reflection_text）
+        reflection_to_inject = retry_reflection_text or reflection_text
+
+        if reflection_to_inject:
+            # 等待 chat_history[2] 被设置后再注入
+            # 在 task._reset() 之后，chat_history[2] 应该已经被设置为 task query
+            try:
+                if session.chat_history.get_value_length() >= 3:
+                    original_query_item = session.chat_history.get_item_deep_copy(2)
+                    if original_query_item.role == Role.USER:
+                        original_query = original_query_item.content
+
+                        # 构建 hint prompt（统一使用 Previous Attempt Reflection 格式）
+                        # GRPO rollout 和 Greedy pass 2 使用相同格式，保持一致性
+                        hint_header = (
+                            "\n\n---\n"
+                            "**[Previous Attempt Reflection]**\n"
+                            "Your previous attempt on this task was incorrect. "
+                            "Here is a reflection on what went wrong and how to improve:\n\n"
+                        )
+
+                        hint_footer = "\n\n---\n"
+
+                        # 将 reflection 注入到 task query 的末尾
+                        enhanced_query = original_query + hint_header + reflection_to_inject + hint_footer
+
+                        session.chat_history.set(
+                            2,
+                            ChatHistoryItem(
+                                role=Role.USER,
+                                content=enhanced_query,
+                            ),
+                        )
+
+                        SafeLogger.info(
+                            f"[PreviousSampleEmbedding] Injected reflection into chat_history[2] for sample {session.sample_index}: "
+                            f"{reflection_to_inject[:80]}..."
+                        )
+            except Exception as e:
+                SafeLogger.warning(
+                    f"[PreviousSampleEmbedding] Failed to inject reflection into chat_history[2]: {e}"
+                )
 
     def on_agent_inference(self, callback_args: CallbackArguments) -> None:
         last_chat_history_item = (
@@ -448,9 +550,27 @@ class PreviousSampleEmbeddingCallback(Callback):
         if self._embedding_model is not None:
             return True
         try:
+            # 处理 "auto" device：使用第一个可见 GPU
+            # 注意：SentenceTransformer 不支持 device_map，只能放在单个设备上
+            # 由于 embedding model 通常较小，放在一个 GPU 上即可
+            device = self.embedding_device
+            if device == "auto":
+                import torch
+                if torch.cuda.is_available():
+                    # 使用第一个可见 GPU（受 CUDA_VISIBLE_DEVICES 控制）
+                    device = "cuda:0"
+                    SafeLogger.info(
+                        f"[PreviousSampleEmbedding] Using device {device} for embedding model "
+                        f"(auto mode - embedding models don't support multi-GPU sharding)"
+                    )
+                else:
+                    device = "cpu"
+                    SafeLogger.info(f"[PreviousSampleEmbedding] No CUDA available, using CPU for embedding model")
+
             self._embedding_model = SentenceTransformer(
-                self.embedding_model_name, device=self.embedding_device
+                self.embedding_model_name, device=device
             )
+            SafeLogger.info(f"[PreviousSampleEmbedding] Embedding model loaded on {device}")
         except Exception as exc:  # pragma: no cover
             SafeLogger.error(
                 "[PreviousSampleEmbedding] Failed to load embedding model "
@@ -471,14 +591,20 @@ class PreviousSampleEmbeddingCallback(Callback):
             self._local_tokenizer = AutoTokenizer.from_pretrained(
                 model_path, trust_remote_code=True
             )
+            # 使用 niuload 均匀分配显存（与其他模型一致）
+            if device == "auto":
+                actual_device_map = niuload.balanced_load(model_path, return_device_map_only=True)
+                SafeLogger.info(f"[PreviousSampleEmbedding] Using niuload for balanced GPU allocation")
+            else:
+                actual_device_map = device
             self._local_model = AutoModelForCausalLM.from_pretrained(
                 model_path,
                 torch_dtype=torch.bfloat16,
-                device_map=device,
+                device_map=actual_device_map,
                 trust_remote_code=True,
             )
             self._local_model.eval()
-            SafeLogger.info(f"[PreviousSampleEmbedding] Local model loaded successfully on {device}")
+            SafeLogger.info(f"[PreviousSampleEmbedding] Local model loaded successfully")
             return True
         except Exception as exc:
             SafeLogger.error(f"[PreviousSampleEmbedding] Failed to load local model: {exc}")
@@ -521,8 +647,12 @@ class PreviousSampleEmbeddingCallback(Callback):
                 "pad_token_id": self._local_tokenizer.eos_token_id,
             }
             # 只有 do_sample=True 时才传 temperature
-            if do_sample and temperature > 0:
-                gen_kwargs["temperature"] = temperature
+            try:
+                temp_val = float(temperature) if not isinstance(temperature, (int, float)) else temperature
+            except (ValueError, TypeError):
+                temp_val = 0.7  # 默认值
+            if do_sample and temp_val > 0:
+                gen_kwargs["temperature"] = temp_val
 
             SafeLogger.info(
                 f"[PreviousSampleEmbedding] Local model generate with: "
@@ -633,6 +763,10 @@ class PreviousSampleEmbeddingCallback(Callback):
                 f"[PreviousSampleEmbedding] Rerank selected indices: {selected_indices}, "
                 f"guidance: {guidance[:100]}..."
             )
+
+            # 注册到 Reranker GRPO Training Callback（如果存在）
+            self._register_rerank_to_grpo()
+
             return reranked[:self.utilized_sample_count]
         else:
             self._last_rerank_guidance = ""
@@ -680,13 +814,20 @@ After the memory review, proceed with your solution.
 
                 if record.outcome == "success":
                     # 成功轨迹：显示完整轨迹
-                    try:
-                        conversation = record.session.chat_history.get_value_str(
-                            agent_role_dict, start_index=3, end_index=None
-                        )
-                    except Exception:
-                        conversation = ""
-                    memory_text = f"[Memory {i+1}] [SUCCESS] Question: {question}\nTrajectory:\n{conversation}\n"
+                    # 根据 trajectory_mode 决定是否包含完整轨迹
+                    include_trajectory = self._should_include_trajectory(record)
+
+                    if include_trajectory:
+                        try:
+                            conversation = record.session.chat_history.get_value_str(
+                                agent_role_dict, start_index=3, end_index=None
+                            )
+                        except Exception:
+                            conversation = ""
+                        memory_text = f"[Memory {i+1}] [SUCCESS] Question: {question}\nTrajectory:\n{conversation}\n"
+                    else:
+                        memory_text = f"[Memory {i+1}] [SUCCESS] Question: {question}\n"
+
                     if record.reflection:
                         memory_text += f"\nInsight:\n{record.reflection}\n"
                 else:
@@ -709,18 +850,51 @@ After the memory review, proceed with your solution.
                 if not question:
                     extracted = self._extract_query_text(record.session)
                     question = extracted or ""
-                try:
-                    conversation = record.session.chat_history.get_value_str(
-                        agent_role_dict, start_index=3, end_index=None
-                    )
-                except Exception:
-                    conversation = ""
-                memory_text = f"Question {i+1}: {question}\n{conversation}\n"
+
+                # 根据 trajectory_mode 决定是否包含完整轨迹
+                include_trajectory = self._should_include_trajectory(record)
+
+                if include_trajectory:
+                    try:
+                        conversation = record.session.chat_history.get_value_str(
+                            agent_role_dict, start_index=3, end_index=None
+                        )
+                    except Exception:
+                        conversation = ""
+                    memory_text = f"Question {i+1}: {question}\n{conversation}\n"
+                else:
+                    memory_text = f"Question {i+1}: {question}\n"
+
                 if record.reflection:
                     memory_text += f"\nInsight:\n{record.reflection}\n"
                 parts.append(memory_text)
 
         return "".join(parts)
+
+    def _should_include_trajectory(self, record: _SessionRecord) -> bool:
+        """
+        根据 trajectory_mode 决定是否包含完整轨迹。
+
+        Modes:
+        - "always": 总是包含轨迹
+        - "never": 从不包含轨迹（只用 reflection）
+        - "reflection_only": 如果有 reflection 就不包含轨迹，否则包含
+        - "adaptive": 自适应决定（需要外部设置 record.include_trajectory）
+        """
+        if self.trajectory_mode == "always":
+            return True
+        elif self.trajectory_mode == "never":
+            return False
+        elif self.trajectory_mode == "reflection_only":
+            # 如果有 reflection，就不需要完整轨迹
+            return not bool(record.reflection)
+        elif self.trajectory_mode == "adaptive":
+            # 自适应模式：检查 record 是否有 include_trajectory 标记
+            # 这个标记可以由外部 gate 模型设置
+            return getattr(record, 'include_trajectory', True)
+        else:
+            # 默认包含
+            return True
 
     # ------------------------------------------------------------------
     # Reflection (反思/总结) 相关方法
@@ -873,6 +1047,57 @@ You must output a valid JSON object strictly matching this schema:
         SafeLogger.info(f"[PreviousSampleEmbedding] Generated reflection: {reflection[:200]}...")
         return reflection.strip()
 
+    def generate_retry_reflection(
+        self,
+        query: str,
+        trajectory: str,
+        outcome: str = "failure",
+        error_message: str = "Wrong answer",
+    ) -> Optional[str]:
+        """
+        生成 retry reflection（公开方法，用于 greedy pass 2）。
+
+        Args:
+            query: 用户的原始问题
+            trajectory: greedy pass 1 的轨迹
+            outcome: 结果 ("success" 或 "failure")
+            error_message: 错误信息
+
+        Returns:
+            生成的 reflection 文本，如果生成失败则返回 None
+        """
+        if not self.reflection_use_local_model and not os.getenv(self.reflection_api_key_env):
+            # 没有配置 API key，也没有配置本地模型
+            SafeLogger.warning(
+                "[PreviousSampleEmbedding] Cannot generate retry reflection: "
+                "no local model configured and no API key available"
+            )
+            return None
+
+        reflection_json = self._call_reflection_api(query, trajectory, outcome, error_message)
+        if not reflection_json:
+            return None
+
+        # 尝试从 JSON 中提取 insight
+        try:
+            import json as json_module
+            # 尝试解析 JSON
+            json_str = reflection_json
+            if "```json" in reflection_json:
+                json_str = reflection_json.split("```json")[1].split("```")[0]
+            elif "```" in reflection_json:
+                json_str = reflection_json.split("```")[1].split("```")[0]
+
+            parsed = json_module.loads(json_str.strip())
+            insight = parsed.get("insight", "")
+            if insight:
+                return insight
+        except Exception:
+            pass
+
+        # 如果解析失败，返回原始文本（截取前 500 字符）
+        return reflection_json[:500] if len(reflection_json) > 500 else reflection_json
+
     def _extract_trajectory_text(self, session: Session, agent_role_dict: Mapping[Role, str]) -> str:
         """提取轨迹文本用于反思"""
         try:
@@ -927,15 +1152,55 @@ You must output a valid JSON object strictly matching this schema:
 
 ```json
 {{{{
-  "selected_indices": [1, 3, 5, 7],
-  "reasoning": "Brief explanation of why these were selected...",
-  "guidance": "How to use these historical examples for the current task: ..."
+  "selected_indices": [<your selected indices here>],
+  "reasoning": "Your analysis of why these candidates are most relevant...",
+  "guidance": "Your actionable guidance on how to apply these examples..."
 }}}}
 ```
 
-Notes:
-- `selected_indices` should contain exactly {top_k} numbers (1-indexed)
-- `guidance` should be a concise, actionable instruction (under 100 words) that tells the model how to leverage the selected examples"""
+**IMPORTANT:**
+- `selected_indices` must contain exactly {top_k} numbers (1-indexed, from 1 to {candidate_count})
+- You MUST carefully analyze each candidate and select based on relevance to the current task
+- Do NOT just pick arbitrary indices - actually read and compare the candidates
+- `guidance` should be a concise, actionable instruction (under 100 words)"""
+
+    def _register_baseline_to_grpo(self, sample_index: str | int, is_correct: bool) -> None:
+        """注册 baseline 评估结果到 Reranker GRPO Training Callback"""
+        try:
+            from src.callbacks.instance.reranker_grpo_training_callback import get_reranker_grpo_instance
+            grpo_callback = get_reranker_grpo_instance()
+            if grpo_callback is not None:
+                grpo_callback.register_baseline_result(sample_index, is_correct)
+        except ImportError:
+            pass  # Reranker GRPO callback not available
+        except Exception as e:
+            SafeLogger.warning(f"[PreviousSampleEmbedding] Failed to register baseline to GRPO: {e}")
+
+    def _register_rerank_to_grpo(self) -> None:
+        """注册 rerank 生成到 Reranker GRPO Training Callback"""
+        if not self._last_rerank_messages or not self._last_rerank_response:
+            return
+        if self._current_sample_index is None:
+            return
+
+        try:
+            from src.callbacks.instance.reranker_grpo_training_callback import get_reranker_grpo_instance
+            grpo_callback = get_reranker_grpo_instance()
+            if grpo_callback is not None:
+                grpo_callback.register_reranker_generation(
+                    sample_index=self._current_sample_index,
+                    messages=self._last_rerank_messages,
+                    output_text=self._last_rerank_response,
+                    format_correct=self._last_rerank_format_correct,
+                )
+                SafeLogger.info(
+                    f"[PreviousSampleEmbedding] Registered rerank generation for sample {self._current_sample_index} "
+                    f"(format_correct={self._last_rerank_format_correct})"
+                )
+        except ImportError:
+            pass  # Reranker GRPO callback not available
+        except Exception as e:
+            SafeLogger.warning(f"[PreviousSampleEmbedding] Failed to register rerank to GRPO: {e}")
 
     def _call_rerank_api(
         self,
@@ -953,20 +1218,26 @@ Notes:
         candidates_text_parts = []
         for i, record in enumerate(candidate_records):
             question = record.query_text or self._extract_query_text(record.session) or ""
-            try:
-                trajectory = record.session.chat_history.get_value_str(
-                    agent_role_dict, start_index=3, end_index=None
-                )
-            except Exception:
-                trajectory = ""
-
             outcome_str = "[SUCCESS]" if record.outcome == "success" else "[FAILURE]"
             insight_str = f"\nInsight: {record.reflection}" if record.reflection else ""
 
-            candidate_text = f"""**Candidate {i+1}** {outcome_str}
+            # 根据 rerank_include_trajectory 决定是否包含完整轨迹
+            if self.rerank_include_trajectory:
+                try:
+                    trajectory = record.session.chat_history.get_value_str(
+                        agent_role_dict, start_index=3, end_index=None
+                    )
+                except Exception:
+                    trajectory = ""
+                candidate_text = f"""**Candidate {i+1}** {outcome_str}
 Question: {question}
 Trajectory:
 {trajectory}{insight_str}
+"""
+            else:
+                # 只用 query + reflection，不包含完整轨迹
+                candidate_text = f"""**Candidate {i+1}** {outcome_str}
+Question: {question}{insight_str}
 """
             candidates_text_parts.append(candidate_text)
 
@@ -976,9 +1247,15 @@ Trajectory:
         user_prompt = self.rerank_user_prompt_template.format(
             current_query=current_query,
             candidate_count=len(candidate_records),
-            top_k=self.utilized_sample_count,
+            top_k=min(self.utilized_sample_count, len(candidate_records)),
             candidates=candidates_text,
         )
+
+        # 保存 messages 用于 GRPO 训练
+        self._last_rerank_messages = [
+            {"role": "system", "content": self.rerank_system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
 
         # 使用本地模型
         if self.rerank_use_local_model:
@@ -992,13 +1269,14 @@ Trajectory:
 
             SafeLogger.info(
                 f"[PreviousSampleEmbedding] Calling local model for rerank, "
-                f"max_new_tokens={self.rerank_max_new_tokens}"
+                f"max_new_tokens={self.rerank_max_new_tokens}, do_sample={self.rerank_local_do_sample}, "
+                f"temperature={self.rerank_local_temperature}"
             )
             response_text = self._call_local_model(
                 system_prompt=self.rerank_system_prompt,
                 user_prompt=user_prompt,
                 max_new_tokens=self.rerank_max_new_tokens,
-                temperature=self.rerank_api_temperature or 0.0,
+                temperature=self.rerank_local_temperature,
                 do_sample=self.rerank_local_do_sample,
             )
             if not response_text:
@@ -1053,9 +1331,16 @@ Trajectory:
 
         SafeLogger.info(f"[PreviousSampleEmbedding] Rerank response: {response_text[:300]}...")
 
-        # 解析 JSON 响应
+        # 保存 response 用于 GRPO 训练
+        self._last_rerank_response = response_text
+
+        # 解析响应 - 支持多种格式
+        import re
+        selected_indices_1indexed = []
+        guidance = ""
+
+        # 方法1: 尝试完整 JSON 解析
         try:
-            # 尝试提取 JSON 块
             json_match = response_text
             if "```json" in response_text:
                 json_match = response_text.split("```json")[1].split("```")[0]
@@ -1065,24 +1350,54 @@ Trajectory:
             result = json.loads(json_match.strip())
             selected_indices_1indexed = result.get("selected_indices", [])
             guidance = result.get("guidance", "")
+        except Exception:
+            # 方法2: 正则匹配 JSON 片段 { "selected_indices": [...] }
+            json_fragment = re.search(r'\{\s*"selected_indices"\s*:\s*\[([^\]]+)\]', response_text)
+            if json_fragment:
+                try:
+                    indices_str = json_fragment.group(1)
+                    selected_indices_1indexed = [int(x.strip()) for x in indices_str.split(",") if x.strip().lstrip('-').isdigit()]
+                except Exception:
+                    pass
 
-            # 转换为 0-indexed，并验证范围
-            selected_indices = []
-            for idx in selected_indices_1indexed:
-                idx_0 = idx - 1  # 1-indexed -> 0-indexed
-                if 0 <= idx_0 < len(candidate_records):
-                    selected_indices.append(idx_0)
+            # 方法3: 匹配 markdown 格式 **Selected Indices:** [...]
+            if not selected_indices_1indexed:
+                md_match = re.search(r'\*?\*?[Ss]elected[_ ][Ii]ndices\*?\*?\s*:?\s*\[([^\]]+)\]', response_text)
+                if md_match:
+                    try:
+                        indices_str = md_match.group(1)
+                        selected_indices_1indexed = [int(x.strip()) for x in indices_str.split(",") if x.strip().lstrip('-').isdigit()]
+                    except Exception:
+                        pass
 
-            # 如果解析失败或数量不对，补齐
-            if len(selected_indices) < self.utilized_sample_count:
-                for i in range(len(candidate_records)):
-                    if i not in selected_indices:
-                        selected_indices.append(i)
-                        if len(selected_indices) >= self.utilized_sample_count:
-                            break
+            # 提取 guidance
+            guidance_match = re.search(r'"guidance"\s*:\s*"([^"]*)"', response_text)
+            if guidance_match:
+                guidance = guidance_match.group(1)
 
-            return selected_indices[:self.utilized_sample_count], guidance
+        # 转换为 0-indexed，验证范围，去重
+        selected_indices = []
+        seen = set()
+        for idx in selected_indices_1indexed:
+            idx_0 = idx - 1  # 1-indexed -> 0-indexed
+            if 0 <= idx_0 < len(candidate_records) and idx_0 not in seen:
+                selected_indices.append(idx_0)
+                seen.add(idx_0)
 
-        except Exception as exc:
-            SafeLogger.warning(f"[PreviousSampleEmbedding] Failed to parse rerank response: {exc}")
-            return list(range(min(self.utilized_sample_count, len(candidate_records)))), ""
+        # 判断格式是否正确：需要恰好选出 target_count 个有效索引
+        target_count = min(self.utilized_sample_count, len(candidate_records))
+        format_correct = (len(selected_indices) == target_count)
+        self._last_rerank_format_correct = format_correct
+        SafeLogger.info(f"[PreviousSampleEmbedding] Rerank format_correct={format_correct} "
+                       f"(got {len(selected_indices)}, expected {target_count})")
+
+        # 如果数量不足，补齐
+        if len(selected_indices) < target_count:
+            for i in range(len(candidate_records)):
+                if i not in seen:
+                    selected_indices.append(i)
+                    seen.add(i)
+                    if len(selected_indices) >= target_count:
+                        break
+
+        return selected_indices[:target_count], guidance

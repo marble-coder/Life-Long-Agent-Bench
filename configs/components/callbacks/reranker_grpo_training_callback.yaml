@@ -1,0 +1,4 @@
+reranker_grpo_training_callback:
+  module: "src.callbacks.instance.reranker_grpo_training_callback.RerankerGRPOTrainingCallback"
+  parameters:
+    config_path: null

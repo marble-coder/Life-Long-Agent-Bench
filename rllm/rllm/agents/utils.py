@@ -53,13 +53,22 @@ def convert_messages_to_tokens_and_masks(messages: list[dict[str, str]], tokeniz
     all_msg_tokens = []
     all_msg_masks = []
 
-    def _convert_message_to_tokens_and_masks(msg, first_msg=False, generation_msg=False):
+    def _convert_message_to_tokens_and_masks(msg, first_msg=False, generation_msg=False, prev_added_gen_prompt=False):
+        """
+        Args:
+            msg: The message to convert.
+            first_msg: Whether this is the first message (adds BOS token).
+            generation_msg: Whether to add generation prompt after this message.
+            prev_added_gen_prompt: Whether the previous message added a generation prompt.
+                                   If True, assistant messages should remove their header token.
+        """
         msg_text = parser.parse([msg], add_generation_prompt=generation_msg, is_first_msg=first_msg)
 
-        # Remove the assistant token since it is contained in previous message as generation prompt
-        if msg["role"] == "assistant":
+        # Remove the assistant token only if the previous message added a generation prompt
+        # This ensures proper chat template structure for multi-turn conversations
+        if msg["role"] == "assistant" and prev_added_gen_prompt:
             assert msg_text.startswith(parser.assistant_token), f"Expected assistant token {parser.assistant_token} but got {msg_text}"
-            msg_text = msg_text.replace(parser.assistant_token, "")
+            msg_text = msg_text.replace(parser.assistant_token, "", 1)  # Only replace first occurrence
 
         msg_tokens = tokenizer.encode(msg_text, add_special_tokens=False)
         mask_value = 1 if msg["role"] == "assistant" else 0
@@ -68,7 +77,36 @@ def convert_messages_to_tokens_and_masks(messages: list[dict[str, str]], tokeniz
         return msg_tokens, msg_mask
 
     for i, msg in enumerate(messages):
-        msg_tokens, msg_mask = _convert_message_to_tokens_and_masks(msg, first_msg=(contains_first_msg and i == 0), generation_msg=(contains_generation_msg and i == len(messages) - 1))
+        is_first_msg = contains_first_msg and i == 0
+        is_last_msg = i == len(messages) - 1
+
+        # Determine if we should add generation prompt:
+        # 1. If this is the last message and contains_generation_msg is True
+        # 2. If this is NOT an assistant message AND the next message IS an assistant message
+        #    (to prepare the assistant token for the next message)
+        if is_last_msg:
+            add_gen_prompt = contains_generation_msg
+        elif msg["role"] != "assistant" and i + 1 < len(messages) and messages[i + 1]["role"] == "assistant":
+            add_gen_prompt = True
+        else:
+            add_gen_prompt = False
+
+        # Check if previous message added a generation prompt
+        prev_added_gen_prompt = False
+        if i > 0:
+            prev_msg = messages[i - 1]
+            prev_is_last = (i - 1) == len(messages) - 1
+            if prev_is_last:
+                prev_added_gen_prompt = contains_generation_msg
+            elif prev_msg["role"] != "assistant" and msg["role"] == "assistant":
+                prev_added_gen_prompt = True
+
+        msg_tokens, msg_mask = _convert_message_to_tokens_and_masks(
+            msg,
+            first_msg=is_first_msg,
+            generation_msg=add_gen_prompt,
+            prev_added_gen_prompt=prev_added_gen_prompt
+        )
         all_msg_tokens.extend(msg_tokens)
         all_msg_masks.extend(msg_mask)
 

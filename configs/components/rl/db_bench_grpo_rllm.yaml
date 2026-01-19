@@ -1,4 +1,5 @@
 group_size: 8  # how many attempts per sample before one GRPO update
+accumulate_samples: 1  # 累积多少个样本后训练（设为4则每4个样本训练一次）
 best_metric_strategy: best_reward  # options: best_reward (1 beats -1), best_reward_last (prefer latest among best)
 
 generation:
@@ -9,11 +10,12 @@ generation:
   num_beams: 1
 
 grpo:
-  beta: 0.04  # KL系数，防止模型偏离太远
-  clip_param: 0.2  # PPO clip参数
-  normalize_rewards: true  # 开启归一化，这是GRPO的核心（Group Relative）
-  use_best_of_n: false  # 关闭Best-of-N，使用全部4个样本以避免2样本归一化问题
-  reference_model_path: null  # optional: path to frozen reference model; null uses initial policy as reference
+  beta: 0.04                      # KL penalty 系数
+  clip_param: 0.2                 # PPO clip range (epsilon)
+  clip_ratio_c: 3.0               # dual-clip 上界（负优势时的额外裁剪，对齐 verl）
+  kl_penalty_mode: "k3"           # KL 计算模式：k1, k2, k3(low_var_kl), abs
+  loss_agg_mode: "token-mean"     # loss 聚合方式：token-mean, seq-mean-token-sum, seq-mean-token-mean
+  reference_model_path: null      # optional: path to frozen reference model; null uses initial policy as reference
 
 lora:
   r: 64
@@ -24,9 +26,8 @@ lora:
 optim:
   learning_rate: 2.0e-6
   weight_decay: 0.01
-  max_grad_norm: 10  # 梯度裁剪阈值（更保守）
-  num_train_epochs: 3
-  gradient_accumulation_steps: 8
+  max_grad_norm: 1.0               # 梯度裁剪阈值（对齐 verl 默认值）
+  num_train_epochs: 1              # 每个 group 训练的 epoch 数（每个 epoch 重新计算 new_log_prob）
 
 save:
   lora_output_dir: "outputs/{TIMESTAMP}/grpo_rllm_lora"

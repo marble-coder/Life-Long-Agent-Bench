@@ -1,4 +1,4 @@
 grpo_training_callback_rllm:
   module: "src.callbacks.instance.grpo_training_callback_rllm.GRPOTrainingCallbackRLLM"
-  parameters: 
-    config_path: null
+  parameters:
+    config_path: null  # Path to GRPO config YAML file

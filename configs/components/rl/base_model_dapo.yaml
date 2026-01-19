@@ -1,0 +1,65 @@
+# Base Model DAPO Training Configuration
+# DAPO (Decoupled Clip and Dynamic Sampling Policy Optimization)
+# 用于 Reflection DAPO 的内层训练（k2 rollouts per reflection）
+
+# Model 配置
+model_name_or_path: /mnt/ssd2/models/Meta-Llama-3.1-8B-Instruct
+model_device: auto
+
+# DAPO 配置
+group_size: 4  # k2 = 4 (每个 reflection 对应 4 个 base model rollouts)
+accumulate_samples: 2  # 累积多少个样本后训练
+best_metric_strategy: best_reward  # best_reward | all_correct
+
+# Format reward 配置（防止训练崩溃）
+use_format_reward: true  # 启用格式奖励：格式错误扣 0.5 分
+
+# Generation 配置（采样生成）
+generation:
+  do_sample: true
+  temperature: 0.7
+  top_p: 0.9
+  max_new_tokens: 2048
+
+# DAPO 算法配置
+dapo:
+  # Clip-Higher: 非对称 clip，上界更宽松以鼓励探索
+  clip_low: 0.2   # 下界 clip (与 GRPO 相同)
+  clip_high: 0.28  # 上界 clip (Clip-Higher，比下界更宽松)
+  clip_ratio_c: 3.0  # dual-clip 参数
+  
+  # Token-level loss aggregation
+  loss_agg_mode: token-level  # 按 token 数量加权，而非按样本平均
+  
+  # Dynamic Sampling: 过滤 accuracy=0 或 1 的 group
+  enable_dynamic_sampling: true
+
+# LoRA 配置
+lora:
+  enabled: true
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+
+# 优化器配置
+optim:
+  learning_rate: 2e-5
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  num_train_epochs: 1
+
+# 保存配置
+save:
+  lora_output_dir: base_model_lora  # 相对于主 output 目录
+
+# 监控配置
+monitoring:
+  tensorboard: true

@@ -41,6 +41,8 @@ from .reflective_memory_callback import ReflectiveMemoryCallback
 from .grpo_training_callback import GRPOTrainingCallback
 from .grpo_training_callback_rllm import GRPOTrainingCallbackRLLM
 from .memory_review_grpo_callback import MemoryReviewGRPOCallback
+from .reranker_grpo_training_callback import RerankerGRPOTrainingCallback
+from .reflection_grpo_training_callback import ReflectionGRPOTrainingCallback
 __all__ = [
     "CurrentSessionSavingCallback",
     "PreviousSampleUtilizationCallback",
@@ -59,4 +61,6 @@ __all__ = [
     "GRPOTrainingCallback",
     "GRPOTrainingCallbackRLLM",
     "MemoryReviewGRPOCallback",
+    "RerankerGRPOTrainingCallback",
+    "ReflectionGRPOTrainingCallback",
 ]
